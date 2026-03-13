@@ -1,0 +1,10 @@
+[Trigger]
+Operation = Install
+Operation = Upgrade
+Type = Package
+Target = systemd
+
+[Action]
+Description = Update and sign systemd-boot for Secure Boot
+When = PostTransaction
+Exec = /usr/local/sbin/secureboot-sync-loader.sh

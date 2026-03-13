@@ -122,7 +122,7 @@ for k in "$ESP_MOUNT"/vmlinuz-*; do
   [[ -f "$k" ]] && sign_in_place "$k"
 done
 
-# --- Install pacman hooks for automatic kernel signing ---
+# --- Install pacman hooks for automatic signing/loader sync ---
 mkdir -p /etc/pacman.d/hooks
 mkdir -p /usr/local/sbin
 
@@ -131,7 +131,16 @@ if [[ -f "$(dirname "$0")/95-secureboot-sign.hook" ]]; then
   cp "$(dirname "$0")/95-secureboot-sign.hook" /etc/pacman.d/hooks/
   log_info "Pacman hook installed: 95-secureboot-sign.hook"
 else
-  log_warn "Hook file 95-secureboot-sign.hook not found in script directory"
+  log_error "Required hook file 95-secureboot-sign.hook not found in script directory"
+  exit 1
+fi
+
+if [[ -f "$(dirname "$0")/96-secureboot-sync-loader.hook" ]]; then
+  cp "$(dirname "$0")/96-secureboot-sync-loader.hook" /etc/pacman.d/hooks/
+  log_info "Pacman hook installed: 96-secureboot-sync-loader.hook"
+else
+  log_error "Required hook file 96-secureboot-sync-loader.hook not found in script directory"
+  exit 1
 fi
 
 if [[ -f "$(dirname "$0")/secureboot-sign-kernels.sh" ]]; then
@@ -139,7 +148,17 @@ if [[ -f "$(dirname "$0")/secureboot-sign-kernels.sh" ]]; then
   chmod +x /usr/local/sbin/secureboot-sign-kernels.sh
   log_info "Kernel signing script installed: secureboot-sign-kernels.sh"
 else
-  log_warn "Signing script secureboot-sign-kernels.sh not found in script directory"
+  log_error "Required signing script secureboot-sign-kernels.sh not found in script directory"
+  exit 1
+fi
+
+if [[ -f "$(dirname "$0")/secureboot-sync-loader.sh" ]]; then
+  cp "$(dirname "$0")/secureboot-sync-loader.sh" /usr/local/sbin/
+  chmod +x /usr/local/sbin/secureboot-sync-loader.sh
+  log_info "Loader sync script installed: secureboot-sync-loader.sh"
+else
+  log_error "Required loader sync script secureboot-sync-loader.sh not found in script directory"
+  exit 1
 fi
 
 # --- Recreate a single Arch (SecureBoot) boot entry ---
@@ -194,7 +213,7 @@ validate_secureboot() {
     [[ -f "$MOK_DIR/MOK.key" && -f "$MOK_DIR/MOK.crt" ]] && { log_info "✓ MOK keys present"; ((checks++)) || true; }
     [[ -f "$ESP_MOUNT/EFI/arch/shimx64.efi" ]] && { log_info "✓ Shim installed"; ((checks++)) || true; }
     [[ -f "$ESP_MOUNT/EFI/arch/grubx64.efi" ]] && { log_info "✓ systemd-boot signed"; ((checks++)) || true; }
-    [[ -f "/etc/pacman.d/hooks/95-secureboot-sign.hook" ]] && { log_info "✓ Pacman hooks installed"; ((checks++)) || true; }
+    [[ -f "/etc/pacman.d/hooks/95-secureboot-sign.hook" && -f "/etc/pacman.d/hooks/96-secureboot-sync-loader.hook" ]] && { log_info "✓ Pacman hooks installed"; ((checks++)) || true; }
     efibootmgr | grep -q "Arch (SecureBoot)" && { log_info "✓ Boot entry exists"; ((checks++)) || true; }
     echo $checks
 }

@@ -15,7 +15,7 @@
 3. [Prerequisites](#prerequisites)
 4. [Partition & Install](#partition--install)
 5. [Secure Boot Setup](#secure-boot-setup-run-post_installsh-in-chroot)
-   - [Automatic Kernel Signing System](#automatic-kernel-signing-system)
+   - [Automatic Signing And Loader Sync System](#automatic-signing-and-loader-sync-system)
 6. [First Boot & MOK Enrollment](#first-boot--mok-enrollment)
 7. [Post-Reboot Helper](#post-reboot-helper)
 8. [EFI Cleanup Utility](#efi-cleanup-utility)
@@ -194,18 +194,24 @@ Make sure you have everything below sorted before you touch the scripts:
 
 ## Partition & Install
 
-Create a working directory and download the scripts (`curl` is available on the ISO; install `wget` if you prefer that tool):
+Clone the repo so `post_install.sh` can install the required hook and helper files from the same directory:
 
 ```bash
-mkdir -p arch_setup
+git clone https://github.com/haiderim/arch_setup.git
 cd arch_setup
-curl -LO https://raw.githubusercontent.com/haiderim/arch_setup/main/pre_install.sh
-curl -LO https://raw.githubusercontent.com/haiderim/arch_setup/main/post_install.sh
-curl -LO https://raw.githubusercontent.com/haiderim/arch_setup/main/efi_cleanup.sh  # optional helper
-chmod +x pre_install.sh post_install.sh efi_cleanup.sh
+chmod +x pre_install.sh post_install.sh efi_cleanup.sh secureboot-sign-kernels.sh secureboot-sync-loader.sh
 ```
 
-Those `curl -LO` commands pull the latest versions straight from GitHub. If you prefer to review the scripts first, open each URL in a browser, copy the contents into matching files, and make them executable with `chmod +x`.
+Why clone instead of downloading only `pre_install.sh` and `post_install.sh`:
+
+* `post_install.sh` installs companion assets from the repo directory
+* The Secure Boot maintenance path now depends on four extra files:
+* `95-secureboot-sign.hook`
+* `96-secureboot-sync-loader.hook`
+* `secureboot-sign-kernels.sh`
+* `secureboot-sync-loader.sh`
+
+If those files are missing, `post_install.sh` will now stop with an error instead of continuing with an incomplete Secure Boot setup.
 
 Run pre-install (from ISO):
 
@@ -244,24 +250,31 @@ Inside the chroot, take a moment to run `lsblk` or inspect `/etc` before startin
 * `shim-signed` built (AUR) and installed
 * `shimx64.efi`, `MokManager.efi`, and signed `systemd-bootx64.efi` staged in `\EFI\arch`
 * Kernels signed (`/boot/vmlinuz-*`)
-* **Automatic kernel signing hooks installed** for future pacman updates
+* **Automatic kernel signing and systemd-boot sync hooks installed** for future pacman updates
 * Boot entry created: **Arch (SecureBoot)**
 * ZRAM configured (50% of RAM, zstd compression)
 * Snapper configured for Btrfs snapshots (timeline disabled, 5 snapshots max)
 * Boot permissions secured (700 on /boot and /boot/loader)
 * Reflector configured for optimal mirror selection
 
-### Automatic Kernel Signing System
+### Automatic Signing And Loader Sync System
 
-The setup installs a pacman hook system (`95-secureboot-sign.hook` and `secureboot-sign-kernels.sh`) that automatically signs any new kernels installed via `pacman`. This means:
+The setup installs a pacman hook system for both kernels and the shim-loaded `systemd-boot` binary:
+
+* `95-secureboot-sign.hook` + `secureboot-sign-kernels.sh` sign new kernels after kernel package updates
+* `96-secureboot-sync-loader.hook` + `secureboot-sync-loader.sh` refresh and re-sign `systemd-boot` after `systemd` package updates
+
+This means:
 
 * No manual intervention required after kernel updates
+* No manual intervention required after `systemd` updates
 * Kernels are signed immediately after installation/upgrade
+* The shim-loaded `\EFI\arch\grubx64.efi` stays in sync with the current `systemd-boot`
 * System remains bootable with Secure Boot enabled after `pacman -Syu`
-* Signing script includes verification and error handling
+* Signing scripts include verification and error handling
 * Comprehensive logging for troubleshooting
 
-The hook triggers whenever files matching `boot/vmlinuz-*` are installed or upgraded, ensuring your Secure Boot setup remains functional across system updates.
+The kernel hook triggers on kernel package upgrades, and the loader hook triggers on `systemd` upgrades. Together they keep both the kernel and the shim-loaded bootloader signed across normal system updates.
 
 ---
 
@@ -273,7 +286,7 @@ At first boot, MokManager will launch:
 2. Navigate to `\EFI\arch\keys\MOK.cer`
 3. Enroll → reboot
 
-Now shim trusts your MOK, and systemd-boot will load signed kernels.
+Now shim trusts your MOK, and systemd-boot will load signed kernels and a signed bootloader binary.
 
 ---
 
@@ -334,13 +347,17 @@ sbverify --list /boot/vmlinuz-linux  # Should show signature info
 ls -ld /boot                 # Should be drwx------ (0700)
 ls -l /boot/loader/random-seed   # Should be -rw------- (0600)
 
-# Automatic kernel signing verification
+# Automatic signing verification
 ls -la /etc/pacman.d/hooks/95-secureboot-sign.hook  # Should exist and be readable
+ls -la /etc/pacman.d/hooks/96-secureboot-sync-loader.hook  # Should exist and be readable
 ls -la /usr/local/sbin/secureboot-sign-kernels.sh   # Should exist and be executable
-cat /etc/pacman.d/hooks/95-secureboot-sign.hook     # Verify hook configuration
+ls -la /usr/local/sbin/secureboot-sync-loader.sh    # Should exist and be executable
+cat /etc/pacman.d/hooks/95-secureboot-sign.hook     # Verify kernel hook configuration
+cat /etc/pacman.d/hooks/96-secureboot-sync-loader.hook  # Verify loader hook configuration
 
 # Test the signing system (optional)
 sudo /usr/local/sbin/secureboot-sign-kernels.sh      # Should report "0/0 kernels signed" or similar
+sudo /usr/local/sbin/secureboot-sync-loader.sh       # Should update/sign systemd-boot and exit successfully
 
 # ZRAM status
 swapon --show | grep zram    # Should show ZRAM swap device
@@ -444,7 +461,7 @@ A: No — shim + MOK works on locked Secure Boot machines without firmware key e
 A: No, only PE executables (EFI + kernels).
 
 **Q: Do I need to re-sign after updates?**
-A: No — pacman hooks handle it automatically. The setup installs a hook system (`95-secureboot-sign.hook` and `secureboot-sign-kernels.sh`) that automatically signs new kernels whenever you run `pacman -Syu`. The hook triggers on kernel installations/upgrades and signs them using your existing MOK keys, keeping your system bootable with Secure Boot enabled.
+A: No — pacman hooks handle it automatically. The setup installs two maintenance paths: `95-secureboot-sign.hook` with `secureboot-sign-kernels.sh` for kernel upgrades, and `96-secureboot-sync-loader.hook` with `secureboot-sync-loader.sh` for `systemd` upgrades. Together they keep both the kernels and the shim-loaded `systemd-boot` binary signed across `pacman -Syu`.
 
 **Q: What if I have multiple users?**
 A: Override with `USER_NAME=youruser`.
