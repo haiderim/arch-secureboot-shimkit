@@ -205,11 +205,13 @@ chmod +x pre_install.sh post_install.sh efi_cleanup.sh secureboot-sign-kernels.s
 Why clone instead of downloading only `pre_install.sh` and `post_install.sh`:
 
 * `post_install.sh` installs companion assets from the repo directory
-* The Secure Boot maintenance path now depends on four extra files:
+* The Secure Boot maintenance path now depends on six extra files:
 * `95-secureboot-sign.hook`
 * `96-secureboot-sync-loader.hook`
 * `secureboot-sign-kernels.sh`
 * `secureboot-sync-loader.sh`
+* `secureboot-restore-hooks.sh`
+* `secureboot-post-rollback.service`
 
 If those files are missing, `post_install.sh` will now stop with an error instead of continuing with an incomplete Secure Boot setup.
 
@@ -251,6 +253,7 @@ Inside the chroot, take a moment to run `lsblk` or inspect `/etc` before startin
 * `shimx64.efi`, `MokManager.efi`, and signed `systemd-bootx64.efi` staged in `\EFI\arch`
 * Kernels signed (`/boot/vmlinuz-*`)
 * **Automatic kernel signing and systemd-boot sync hooks installed** for future pacman updates
+* **Hook recovery service installed** (`secureboot-post-rollback.service`) to restore missing hooks and re-sign kernels automatically on every boot
 * Boot entry created: **Arch (SecureBoot)**
 * ZRAM configured (50% of RAM, zstd compression)
 * Snapper configured for Btrfs snapshots (timeline disabled, 5 snapshots max)
@@ -275,6 +278,24 @@ This means:
 * Comprehensive logging for troubleshooting
 
 The kernel hook triggers on kernel package upgrades, and the loader hook triggers on `systemd` upgrades. Together they keep both the kernel and the shim-loaded bootloader signed across normal system updates.
+
+#### Hook Recovery Service
+
+The pacman hooks live in `/etc/pacman.d/hooks/` on the root btrfs subvolume (`@`). They can disappear silently in two ways:
+
+* **btrfs rollback** — `snap-pac` snapshots `@` before every pacman transaction. Rolling back `@` wipes the hooks, but `/var/log` (on the separate `@var_log` subvolume) is untouched, so the pacman log still shows them running. The next kernel upgrade proceeds unsigned.
+* **accidental deletion** — manual cleanup or tooling that clears `/etc/pacman.d/hooks/`.
+
+`post_install.sh` installs a oneshot systemd service to recover automatically:
+
+* `secureboot-post-rollback.service` runs on every boot after `local-fs.target`
+* `secureboot-restore-hooks.sh` checks whether the hooks and sbin scripts are present; if any are missing it recreates them from embedded content (no dependency on the source repo)
+* It also checks whether any kernel on the ESP is unsigned and re-signs if needed
+
+```bash
+# Check recovery service status
+systemctl status secureboot-post-rollback.service
+```
 
 ---
 

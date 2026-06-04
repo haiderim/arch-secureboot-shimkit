@@ -1,0 +1,13 @@
+[Unit]
+Description=Restore Secure Boot pacman hooks and re-sign kernels if missing
+Documentation=https://github.com/haiderim/arch-secureboot-shimkit
+After=local-fs.target
+RequiresMountsFor=/boot
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/secureboot-restore-hooks.sh
+
+[Install]
+WantedBy=multi-user.target

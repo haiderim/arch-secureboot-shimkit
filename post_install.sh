@@ -161,6 +161,25 @@ else
   exit 1
 fi
 
+if [[ -f "$(dirname "$0")/secureboot-restore-hooks.sh" ]]; then
+  cp "$(dirname "$0")/secureboot-restore-hooks.sh" /usr/local/sbin/
+  chmod +x /usr/local/sbin/secureboot-restore-hooks.sh
+  log_info "Restore script installed: secureboot-restore-hooks.sh"
+else
+  log_error "Required restore script secureboot-restore-hooks.sh not found in script directory"
+  exit 1
+fi
+
+if [[ -f "$(dirname "$0")/secureboot-post-rollback.service" ]]; then
+  cp "$(dirname "$0")/secureboot-post-rollback.service" /etc/systemd/system/
+  systemctl daemon-reload
+  systemctl enable secureboot-post-rollback.service
+  log_info "Rollback recovery service installed and enabled"
+else
+  log_error "Required service file secureboot-post-rollback.service not found in script directory"
+  exit 1
+fi
+
 # --- Recreate a single Arch (SecureBoot) boot entry ---
 ESP_DISK="/dev/$(lsblk -no pkname "$ESP_DEV")"
 ESP_PARTNUM="$(cat "/sys/class/block/$(basename "$ESP_DEV")/partition")"
