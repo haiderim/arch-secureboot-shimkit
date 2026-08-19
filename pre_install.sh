@@ -98,7 +98,10 @@ udevadm settle || true
 # Derive partition device paths from the live kernel state instead of
 # guessing a naming suffix (sdX vs nvmeXnYp vs mmcblkXp vs vdX/loopXp).
 # Works for any bus type and stays correct if the naming scheme changes.
-mapfile -t DISK_PARTS < <(lsblk -lnpo NAME,TYPE "$DISK" | awk '$2=="part"{print $1}')
+# lsblk's listing order is NOT guaranteed to match partition number (seen
+# reversed on a disk that previously held a different partition layout) --
+# sort explicitly by the PARTN column, the actual GPT partition number.
+mapfile -t DISK_PARTS < <(lsblk -lnpo NAME,TYPE,PARTN "$DISK" | awk '$2=="part"{print $3, $1}' | sort -n | awk '{print $2}')
 [[ "${#DISK_PARTS[@]}" -eq 2 ]] || { echo "ERROR: expected 2 partitions on $DISK, found ${#DISK_PARTS[@]}" >&2; exit 1; }
 EFI_PART="${DISK_PARTS[0]}"
 CRYPT_PART="${DISK_PARTS[1]}"
