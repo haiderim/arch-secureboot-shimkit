@@ -47,7 +47,7 @@ fi
 validate_parameters
 
 command -v efibootmgr >/dev/null || pacman -Sy --noconfirm efibootmgr
-pacman -Sy --noconfirm --needed base-devel git sbsigntools openssl
+pacman -Sy --noconfirm --needed base-devel git sbsigntools openssl mokutil
 
 # --- Lock down ESP permissions and update fstab entry ---
 chmod 700 "$ESP_MOUNT" || true
