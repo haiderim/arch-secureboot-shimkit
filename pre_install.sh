@@ -180,6 +180,7 @@ log "  LOCALE: $LOCALE"
 
 ln -sf "/usr/share/zoneinfo/$TIMEZONE" /etc/localtime
 hwclock --systohc
+systemctl enable systemd-timesyncd || true
 grep -q "^#${LOCALE} " /etc/locale.gen || { log "ERROR: LOCALE '$LOCALE' not found in /etc/locale.gen"; exit 1; }
 sed -i "s/^#${LOCALE} /${LOCALE} /" /etc/locale.gen
 locale-gen
