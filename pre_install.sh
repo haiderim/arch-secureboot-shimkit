@@ -7,6 +7,9 @@ log(){ echo "[pre-install] $*"; }
 DISK="${DISK:-}"
 HOSTNAME="${HOSTNAME:-archhost}"
 NEWUSER="${NEWUSER:-}"
+TIMEZONE="${TIMEZONE:-Asia/Kolkata}"
+LOCALE="${LOCALE:-en_US.UTF-8}"
+MIRROR_COUNTRIES="${MIRROR_COUNTRIES:-India,Singapore,Germany,Netherlands}"
 
 # Ensure NEWUSER is provided and not set to root
 if [[ -z "$NEWUSER" ]]; then
@@ -74,13 +77,13 @@ validate_parameters() {
     validate_password "$ROOT_PASS" "Root"
     validate_password "$USER_PASS" "User"
     [[ "$ROOT_PASS" != "$USER_PASS" ]] || { echo "ERROR: Root and user passwords must be different" >&2; exit 1; }
+    [[ -f "/usr/share/zoneinfo/$TIMEZONE" ]] || { echo "ERROR: Unknown TIMEZONE '$TIMEZONE' (expected e.g. 'Region/City', see /usr/share/zoneinfo)" >&2; exit 1; }
+    grep -qE "^#?${LOCALE//./\\.} " /usr/share/i18n/SUPPORTED 2>/dev/null || { echo "ERROR: Unknown LOCALE '$LOCALE' (expected e.g. 'en_US.UTF-8', see /usr/share/i18n/SUPPORTED)" >&2; exit 1; }
+    [[ "$MIRROR_COUNTRIES" =~ ^[A-Za-z\ ]+(,[A-Za-z\ ]+)*$ ]] || { echo "ERROR: MIRROR_COUNTRIES must be a comma-separated country name list" >&2; exit 1; }
     log "All parameters validated successfully"
 }
 
 validate_parameters
-
-EFI_PART="${DISK}1"
-CRYPT_PART="${DISK}2"
 
 # --- Partition disk, encrypt root, and mount subvolumes ---
 log "Creating GPT partition table on $DISK"
@@ -90,6 +93,17 @@ parted -s "$DISK" mkpart primary 1025MiB 100%
 parted -s "$DISK" set 1 boot on
 partprobe "$DISK"
 sleep 2
+udevadm settle || true
+
+# Derive partition device paths from the live kernel state instead of
+# guessing a naming suffix (sdX vs nvmeXnYp vs mmcblkXp vs vdX/loopXp).
+# Works for any bus type and stays correct if the naming scheme changes.
+mapfile -t DISK_PARTS < <(lsblk -lnpo NAME,TYPE "$DISK" | awk '$2=="part"{print $1}')
+[[ "${#DISK_PARTS[@]}" -eq 2 ]] || { echo "ERROR: expected 2 partitions on $DISK, found ${#DISK_PARTS[@]}" >&2; exit 1; }
+EFI_PART="${DISK_PARTS[0]}"
+CRYPT_PART="${DISK_PARTS[1]}"
+log "EFI partition: $EFI_PART"
+log "LUKS partition: $CRYPT_PART"
 
 log "Formatting EFI partition"
 mkfs.fat -F32 "$EFI_PART"
@@ -119,10 +133,19 @@ mount "$EFI_PART" /mnt/boot
 
 # --- Install base packages and seed configuration ---
 log "Optimizing mirrors with reflector"
-reflector --country India,Singapore,Germany,Netherlands --latest 10 --protocol http --sort rate --save /etc/pacman.d/mirrorlist || pacman -Syy --noconfirm
+reflector --country "$MIRROR_COUNTRIES" --latest 10 --protocol http --sort rate --save /etc/pacman.d/mirrorlist || pacman -Syy --noconfirm
 
 log "Installing base system"
-packages=(base linux linux-lts linux-firmware btrfs-progs cryptsetup efibootmgr intel-ucode snapper snap-pac sbsigntools zram-generator reflector vi less git openssl iwd nano sudo)
+# Detect CPU vendor to install the matching microcode package; the
+# mkinitcpio "microcode" hook auto-detects whichever package is present.
+UCODE_PKG="intel-ucode"
+case "$(awk -F: '/vendor_id/{print $2; exit}' /proc/cpuinfo | tr -d ' ')" in
+  AuthenticAMD) UCODE_PKG="amd-ucode" ;;
+  GenuineIntel) UCODE_PKG="intel-ucode" ;;
+  *) log "WARNING: unrecognized CPU vendor_id, defaulting to intel-ucode" ;;
+esac
+log "Detected microcode package: $UCODE_PKG"
+packages=(base linux linux-lts linux-firmware btrfs-progs cryptsetup efibootmgr "$UCODE_PKG" snapper snap-pac sbsigntools zram-generator reflector vi less git openssl iwd nano sudo)
 pacman -Sy --noconfirm
 pacstrap /mnt "${packages[@]}"
 
@@ -138,6 +161,9 @@ arch-chroot /mnt /usr/bin/env \
   ROOT_PASS="${ROOT_PASS}" \
   USER_PASS="${USER_PASS}" \
   CRYPT_PART="${CRYPT_PART}" \
+  TIMEZONE="${TIMEZONE}" \
+  LOCALE="${LOCALE}" \
+  MIRROR_COUNTRIES="${MIRROR_COUNTRIES}" \
   bash -s <<'CHROOT_EOF'
 set -euo pipefail
 
@@ -149,12 +175,15 @@ log "Environment check:"
 log "  HOSTNAME: $HOSTNAME"
 log "  NEWUSER: $NEWUSER" 
 log "  CRYPT_PART: $CRYPT_PART"
+log "  TIMEZONE: $TIMEZONE"
+log "  LOCALE: $LOCALE"
 
-ln -sf /usr/share/zoneinfo/Asia/Kolkata /etc/localtime
+ln -sf "/usr/share/zoneinfo/$TIMEZONE" /etc/localtime
 hwclock --systohc
-sed -i 's/^#en_US.UTF-8/en_US.UTF-8/' /etc/locale.gen
+grep -q "^#${LOCALE} " /etc/locale.gen || { log "ERROR: LOCALE '$LOCALE' not found in /etc/locale.gen"; exit 1; }
+sed -i "s/^#${LOCALE} /${LOCALE} /" /etc/locale.gen
 locale-gen
-echo "LANG=en_US.UTF-8" > /etc/locale.conf
+echo "LANG=${LOCALE}" > /etc/locale.conf
 echo "$HOSTNAME" > /etc/hostname
 
 # Configure initramfs hooks for encrypted Btrfs
@@ -165,6 +194,13 @@ mkinitcpio -P
 bootctl install
 ROOT_UUID=$(blkid -s UUID -o value "$CRYPT_PART")
 
+# Use whichever microcode image mkinitcpio actually staged on the ESP,
+# rather than re-deriving CPU vendor. Self-corrects for any vendor string
+# and omits the line cleanly if no microcode package applies.
+UCODE_INITRD=""
+[[ -f /boot/intel-ucode.img ]] && UCODE_INITRD="initrd  /intel-ucode.img"
+[[ -f /boot/amd-ucode.img ]] && UCODE_INITRD="initrd  /amd-ucode.img"
+
 cat > /boot/loader/loader.conf <<EOF2
 default arch.conf
 timeout 3
@@ -174,7 +210,7 @@ EOF2
 cat > /boot/loader/entries/arch.conf <<EOF2
 title   Arch Linux
 linux   /vmlinuz-linux
-initrd  /intel-ucode.img
+$UCODE_INITRD
 initrd  /initramfs-linux.img
 options cryptdevice=UUID=$ROOT_UUID:cryptroot root=/dev/mapper/cryptroot rootflags=subvol=@ rw
 EOF2
@@ -182,7 +218,7 @@ EOF2
 cat > /boot/loader/entries/arch-fallback.conf <<EOF2
 title   Arch Linux (Fallback)
 linux   /vmlinuz-linux
-initrd  /intel-ucode.img
+$UCODE_INITRD
 initrd  /initramfs-linux-fallback.img
 options cryptdevice=UUID=$ROOT_UUID:cryptroot root=/dev/mapper/cryptroot rootflags=subvol=@ rw
 EOF2
@@ -191,14 +227,14 @@ if [[ -f /boot/vmlinuz-linux-lts ]]; then
   cat > /boot/loader/entries/arch-lts.conf <<EOF2
 title   Arch Linux (LTS)
 linux   /vmlinuz-linux-lts
-initrd  /intel-ucode.img
+$UCODE_INITRD
 initrd  /initramfs-linux-lts.img
 options cryptdevice=UUID=$ROOT_UUID:cryptroot root=/dev/mapper/cryptroot rootflags=subvol=@ rw
 EOF2
   cat > /boot/loader/entries/arch-lts-fallback.conf <<EOF2
 title   Arch Linux (LTS Fallback)
 linux   /vmlinuz-linux-lts
-initrd  /intel-ucode.img
+$UCODE_INITRD
 initrd  /initramfs-linux-lts-fallback.img
 options cryptdevice=UUID=$ROOT_UUID:cryptroot root=/dev/mapper/cryptroot rootflags=subvol=@ rw
 EOF2
@@ -260,7 +296,7 @@ systemctl enable systemd-networkd systemd-resolved iwd || true
 # Seed reflector with preferred mirror configuration
 cat > /etc/reflector.conf <<EOF2
 --save /etc/pacman.d/mirrorlist
---country India,Singapore,Germany,Netherlands
+--country ${MIRROR_COUNTRIES}
 --protocol http
 --latest 10
 --sort rate

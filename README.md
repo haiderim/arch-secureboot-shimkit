@@ -106,11 +106,11 @@ timedatectl set-ntp true
 ping -c1 archlinux.org
 ```
 
-Partition (example for SATA disk):
+Partition preview (works for SATA, NVMe, or MMC — this is just to sanity-check the target before running the script):
 
-> **Heads-up:** The commands below wipe whatever lives on `$DISK`. Run `lsblk -f` (or `fdisk -l`) first, confirm the drive letter, and replace `/dev/sda` with your actual device.
+> **Heads-up:** The commands below wipe whatever lives on `$DISK`. Run `lsblk -f` (or `fdisk -l`) first, confirm the drive letter, and replace `/dev/sda` with your actual device (e.g. `/dev/nvme0n1`, `/dev/mmcblk0`).
 >
-> **Note:** `pre_install.sh` currently expects the disk name to end with a single digit (for example `/dev/sda`). If you're installing to NVMe or MMC devices (paths like `/dev/nvme0n1` or `/dev/mmcblk0`), edit the script to add the required `p` partition suffixes before running it, or use a SATA-style device.
+> **Note:** `pre_install.sh` partitions `$DISK` with `parted`, then derives the resulting `EFI_PART`/`CRYPT_PART` device paths from `lsblk` output rather than guessing a suffix. This works unmodified for SATA (`/dev/sda1`), NVMe (`/dev/nvme0n1p1`), and MMC (`/dev/mmcblk0p1`) naming.
 
 ```bash
 # WARNING: This will erase all data on the disk!
@@ -134,6 +134,10 @@ export HOSTNAME=myhost
 export NEWUSER=myuser
 export ROOT_PASS='myrootpass'
 export USER_PASS='mynewuserpass'
+# Optional — override regional defaults (shown values are the script's defaults)
+export TIMEZONE=Asia/Kolkata
+export LOCALE=en_US.UTF-8
+export MIRROR_COUNTRIES=India,Singapore,Germany,Netherlands
 
 # Run the script
 bash ./pre_install.sh
@@ -142,24 +146,13 @@ bash ./pre_install.sh
 **Script assumptions and defaults**
 
 - `pre_install.sh` enforces strong passwords: at least 8 characters, with upper and lower case letters and a number, and the root and user passwords must differ. Let the script prompt interactively if your values fail validation.
-- Timezone defaults to `Asia/Kolkata` and locale to `en_US.UTF-8`. Update `/etc/localtime`, `/etc/locale.conf`, and `/etc/locale.gen` after install (or edit the script before running) if you need different regional settings.
-- Reflector seeds mirrors for India, Singapore, Germany, and the Netherlands. Adjust `/etc/reflector.conf` or rerun reflector with countries closer to you if required.
-- Only `intel-ucode` is installed by default. If you're on AMD hardware, run the following inside the chroot **before** `post_install.sh` so microcode updates are applied on the first Secure Boot:
-
-  ```bash
-  pacman -S --noconfirm amd-ucode
-  sed -i 's#/intel-ucode.img#/amd-ucode.img#g' /boot/loader/entries/*.conf
-  mkinitcpio -P
-  pacman -Rns --noconfirm intel-ucode  # optional, removes unused Intel microcode
-  ```
-
-  Re-run `bootctl update` if you edit the loader entries by hand, and confirm `/boot/loader/entries/*` now reference `amd-ucode.img`.
-- After entering the chroot (see the next section) and before running `post_install.sh`, change the regional defaults if you need to:
+- Timezone defaults to `Asia/Kolkata`, locale to `en_US.UTF-8`, and mirror countries to `India,Singapore,Germany,Netherlands`. Override any of these by exporting `TIMEZONE`, `LOCALE`, or `MIRROR_COUNTRIES` before running `pre_install.sh` — no script edits needed. `TIMEZONE` must match a path under `/usr/share/zoneinfo` (e.g. `America/New_York`), `LOCALE` must exist in `/usr/share/i18n/SUPPORTED` (e.g. `en_GB.UTF-8`), and `MIRROR_COUNTRIES` is a comma-separated Reflector country list (e.g. `United States,Canada`); the script validates all three up front and fails fast on typos.
+- CPU vendor is auto-detected: `pre_install.sh` installs `intel-ucode` or `amd-ucode` based on `/proc/cpuinfo`, and the generated loader entries reference whichever microcode image `mkinitcpio` actually staged on the ESP. No manual steps needed on AMD hardware.
+- Missed setting `TIMEZONE`/`LOCALE`/`MIRROR_COUNTRIES` before running? Change them after entering the chroot (see the next section) and before running `post_install.sh`:
   - `ln -sf /usr/share/zoneinfo/<Region>/<City> /etc/localtime`
   - Open `/etc/locale.gen` with `nano`, uncomment your locale, then run `locale-gen`
   - Write your locale to `/etc/locale.conf`, for example `echo 'LANG=en_GB.UTF-8' > /etc/locale.conf`
   - Edit `/etc/reflector.conf` to replace the preconfigured countries with ones nearer to you
-  _Replace the placeholders with your own values before running the commands._
 
 ---
 
@@ -244,7 +237,7 @@ cryptsetup close cryptroot
 reboot
 ```
 
-Inside the chroot, take a moment to run `lsblk` or inspect `/etc` before starting `post_install.sh`. This is where you should apply the regional changes or AMD microcode steps noted earlier. Once the script reports success, run `exit`, unmount `/mnt`, close `cryptroot`, and reboot into firmware for MOK enrollment.
+Inside the chroot, take a moment to run `lsblk` or inspect `/etc` before starting `post_install.sh`. This is where you should apply regional changes (timezone/locale) noted earlier. Once the script reports success, run `exit`, unmount `/mnt`, close `cryptroot`, and reboot into firmware for MOK enrollment.
 
 **What happens automatically**:
 
@@ -488,7 +481,7 @@ A: No — pacman hooks handle it automatically. The setup installs two maintenan
 A: Override with `USER_NAME=youruser`.
 
 **Q: What mirror countries are configured?**
-A: India, Singapore, Germany, Netherlands are configured in reflector for optimal speed.
+A: India, Singapore, Germany, Netherlands by default. Override with `export MIRROR_COUNTRIES="United States,Canada"` (or any Reflector-recognized country list) before running `pre_install.sh`.
 
 **Q: Why is Snapper timeline creation disabled?**
 A: To conserve space, only manual snapshots are enabled by default with 5 snapshot limit.
@@ -497,7 +490,7 @@ A: To conserve space, only manual snapshots are enabled by default with 5 snapsh
 A: Use `sudo snapper create -d "Description"` or `sudo btrfs subvolume snapshot / /.snapshots/snapshot-`.
 
 **Q: Can I use this on NVMe drives?**
-A: The scripts currently assume disk names like `/dev/sda`. For NVMe or MMC devices you need to edit `pre_install.sh` first to add the `p` partition suffixes (e.g., `EFI_PART="${DISK}p1"`). Until then, stick to SATA-style devices or be ready to adjust the script manually.
+A: Yes. `pre_install.sh` partitions `$DISK` with `parted`, then reads back the resulting partition device paths from `lsblk` instead of guessing a `sdX`/`nvmeXnYp` suffix. SATA, NVMe, and MMC all work with `DISK` set to the base device (e.g. `/dev/sda`, `/dev/nvme0n1`, `/dev/mmcblk0`) — no script edits required.
 
 **Q: What if I forget my LUKS password?**
 A: Data is irrecoverable without the password. This is intentional full-disk encryption.
