@@ -77,10 +77,7 @@ Minimum real end-to-end test loop (see chat history / commit log for a worked ex
   `pacman -S --noconfirm linux` fires `95-secureboot-sign.hook`; `pacman -S --noconfirm systemd`
   fires `96-secureboot-sync-loader.hook`. Confirm re-signing actually happened (not a no-op) by
   hashing the target file before/after, not just checking the hook's own success log line.
-
-## Known gap (not yet fixed)
-
-The installed system enables `systemd-networkd`/`systemd-resolved`/`iwd` but `pre_install.sh` never
-writes a `.network` file, so wired ethernet does not get a DHCP lease after first boot without the
-user creating `/etc/systemd/network/*.network` manually. Discovered during VM testing; out of scope
-for the hardware-portability work that prompted this file — flagging for whoever picks it up next.
+- **"Service enabled" is not "service configured."** `systemctl is-enabled` passing doesn't mean a
+  service actually did anything — e.g. `systemd-networkd` enabled with no matching `.network` file
+  never brings a link up. Verify actual state (`ip a`, file contents on disk) after any
+  network/service-provisioning change, not just that the unit is enabled.

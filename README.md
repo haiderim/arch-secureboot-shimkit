@@ -148,6 +148,7 @@ bash ./pre_install.sh
 - `pre_install.sh` enforces strong passwords: at least 8 characters, with upper and lower case letters and a number, and the root and user passwords must differ. Let the script prompt interactively if your values fail validation.
 - Timezone defaults to `Asia/Kolkata`, locale to `en_US.UTF-8`, and mirror countries to `India,Singapore,Germany,Netherlands`. Override any of these by exporting `TIMEZONE`, `LOCALE`, or `MIRROR_COUNTRIES` before running `pre_install.sh` — no script edits needed. `TIMEZONE` must match a path under `/usr/share/zoneinfo` (e.g. `America/New_York`), `LOCALE` must exist in `/usr/share/i18n/SUPPORTED` (e.g. `en_GB.UTF-8`), and `MIRROR_COUNTRIES` is a comma-separated Reflector country list (e.g. `United States,Canada`); the script validates all three up front and fails fast on typos.
 - CPU vendor is auto-detected: `pre_install.sh` installs `intel-ucode` or `amd-ucode` based on `/proc/cpuinfo`, and the generated loader entries reference whichever microcode image `mkinitcpio` actually staged on the ESP. No manual steps needed on AMD hardware.
+- Wired ethernet gets DHCP automatically: `pre_install.sh` enables `systemd-networkd`/`systemd-resolved`/`iwd` and writes `/etc/systemd/network/20-wired-dhcp.network` (matches `en*`/`eth*` interfaces). Wi-Fi still needs manual `iwctl` setup post-boot; non-standard interface naming needs a custom `.network` file.
 - Missed setting `TIMEZONE`/`LOCALE`/`MIRROR_COUNTRIES` before running? Change them after entering the chroot (see the next section) and before running `post_install.sh`:
   - `ln -sf /usr/share/zoneinfo/<Region>/<City> /etc/localtime`
   - Open `/etc/locale.gen` with `nano`, uncomment your locale, then run `locale-gen`
@@ -406,7 +407,7 @@ Expected:
 * **ZRAM not activating** → Run `systemctl restart swap.target` or check `/etc/systemd/zram-generator.conf`.
 * **Snapper services not starting** → Enable timers: `systemctl enable snapper-cleanup.timer`.
 * **Secure Boot validation fails** → Ensure MOK key is enrolled in firmware settings.
-* **Network not working post-install** → Enable services: `systemctl enable systemd-networkd systemd-resolved iwd`.
+* **Wired network not working post-install** → Ethernet gets DHCP automatically via `/etc/systemd/network/20-wired-dhcp.network` (installed by `pre_install.sh`). If your interface doesn't match `en*`/`eth*` (check with `ip link`), add a matching `.network` file and `systemctl restart systemd-networkd`. For Wi-Fi, authenticate with `iwctl` — it's never automatic.
 * **Mirror download speeds slow** → Run `sudo reflector --country US,DE,JP --latest 20 --protocol https --sort rate --save /etc/pacman.d/mirrorlist`.
 
 ---
@@ -478,10 +479,10 @@ A: No, only PE executables (EFI + kernels).
 A: No — pacman hooks handle it automatically. The setup installs two maintenance paths: `95-secureboot-sign.hook` with `secureboot-sign-kernels.sh` for kernel upgrades, and `96-secureboot-sync-loader.hook` with `secureboot-sync-loader.sh` for `systemd` upgrades. Together they keep both the kernels and the shim-loaded `systemd-boot` binary signed across `pacman -Syu`.
 
 **Q: What if I have multiple users?**
-A: Override with `USER_NAME=youruser`.
+A: `NEWUSER` (required, `pre_install.sh`) is the account created during install. `post_install.sh` runs later and auto-detects the admin user as the first UID ≥ 1000 account in `/etc/passwd` — if you created more than one user by hand before running it, pin the right one with `USER_NAME=youruser ./post_install.sh`.
 
-**Q: What mirror countries are configured?**
-A: India, Singapore, Germany, Netherlands by default. Override with `export MIRROR_COUNTRIES="United States,Canada"` (or any Reflector-recognized country list) before running `pre_install.sh`.
+**Q: What timezone, locale, and mirror countries are configured?**
+A: `Asia/Kolkata`, `en_US.UTF-8`, and `India,Singapore,Germany,Netherlands` by default. Override any of them with `export TIMEZONE=...`, `export LOCALE=...`, or `export MIRROR_COUNTRIES="United States,Canada"` before running `pre_install.sh` — all three are validated up front and the script fails fast on a typo.
 
 **Q: Why is Snapper timeline creation disabled?**
 A: To conserve space, only manual snapshots are enabled by default with 5 snapshot limit.
@@ -491,6 +492,12 @@ A: Use `sudo snapper create -d "Description"` or `sudo btrfs subvolume snapshot 
 
 **Q: Can I use this on NVMe drives?**
 A: Yes. `pre_install.sh` partitions `$DISK` with `parted`, then reads back the resulting partition device paths from `lsblk` instead of guessing a `sdX`/`nvmeXnYp` suffix. SATA, NVMe, and MMC all work with `DISK` set to the base device (e.g. `/dev/sda`, `/dev/nvme0n1`, `/dev/mmcblk0`) — no script edits required.
+
+**Q: Does this work on AMD CPUs?**
+A: Yes, no manual steps needed. `pre_install.sh` detects the CPU vendor from `/proc/cpuinfo` and installs `amd-ucode` or `intel-ucode` accordingly; the generated loader entries reference whichever microcode image `mkinitcpio` actually staged on the ESP, so the boot entries always point at a file that exists.
+
+**Q: Does networking work right after install?**
+A: Wired ethernet does, via a DHCP profile `pre_install.sh` writes to `/etc/systemd/network/20-wired-dhcp.network` (matches `en*`/`eth*` interfaces). Wi-Fi does not — authenticate manually with `iwctl` after first boot; the packages needed are already installed.
 
 **Q: What if I forget my LUKS password?**
 A: Data is irrecoverable without the password. This is intentional full-disk encryption.

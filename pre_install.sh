@@ -293,6 +293,18 @@ log "Sudo access configured for wheel group"
 # Enable essential network daemons
 systemctl enable systemd-networkd systemd-resolved iwd || true
 
+# Provision a default DHCP profile for wired interfaces. systemd-networkd
+# has no built-in catch-all match; without this file the service runs but
+# never brings an ethernet link up.
+mkdir -p /etc/systemd/network
+cat > /etc/systemd/network/20-wired-dhcp.network <<'EOF2'
+[Match]
+Name=en* eth*
+
+[Network]
+DHCP=yes
+EOF2
+
 # Seed reflector with preferred mirror configuration
 cat > /etc/reflector.conf <<EOF2
 --save /etc/pacman.d/mirrorlist
