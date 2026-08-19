@@ -17,14 +17,23 @@ hooks that keep signatures current across updates.
   something a different machine/user would need to change (see `DISK`, `HOSTNAME`, `NEWUSER`,
   `TIMEZONE`, `LOCALE`, `MIRROR_COUNTRIES`).
 - **Never guess device/partition naming or CPU vendor from a static default — derive from live
-  state.** `EFI_PART`/`CRYPT_PART` come from `lsblk` output after partitioning, not a
-  string-concatenated suffix (works unmodified across SATA/NVMe/MMC). The initrd microcode line
-  references whichever ucode image `mkinitcpio` actually staged on the ESP, not a hardcoded
-  `intel-ucode`. Don't reintroduce guessing in either place.
+  state.** `EFI_PART`/`CRYPT_PART` come from `lsblk` output after partitioning, sorted explicitly by
+  the `PARTN` column (actual GPT partition number) — not a string-concatenated suffix, and not
+  `lsblk`'s emission order either, which is NOT guaranteed to match partition number (seen reversed
+  on a disk that previously held a different partition table — silently swapped `EFI_PART`/
+  `CRYPT_PART` and broke the install). The initrd microcode line references whichever ucode image
+  `mkinitcpio` actually staged on the ESP, not a hardcoded `intel-ucode`. Don't reintroduce guessing,
+  or trust unsorted list order, in either place.
 - **Network stack is NetworkManager + wpa_supplicant.** Enabled in `pre_install.sh`'s chroot phase
   (`systemctl enable NetworkManager systemd-resolved`); `wpa_supplicant` is dbus-activated by
   NetworkManager on demand, never enabled as its own unit. Do not reintroduce `iwd` or
   `systemd-networkd` — two network managers on the same interfaces fight over DHCP/link state.
+- **Dropping a config file isn't enough — check whether the tool has a separate registry.**
+  `post_install.sh` writes `/etc/snapper/configs/root` directly (Snapper has no `create-config` path
+  that works against an already-mounted root subvolume), but Arch's `snapper` CLI and `snap-pac`'s
+  pacman hooks only recognize configs listed in `/etc/conf.d/snapper`'s `SNAPPER_CONFIGS` — without
+  that line, snapshots silently never happen despite every other artifact looking correctly set up.
+  Register it there too, before `snapperd` first starts.
 - Both scripts are `set -euo pipefail`. Guard intentional non-fatal failures with `|| true`
   explicitly; don't let one slip in by accident.
 
@@ -76,6 +85,16 @@ UEFI firmware/NVRAM, no Secure Boot state. Use QEMU/KVM — check `/dev/kvm` gro
   `pacman -S --noconfirm linux` fires `95-secureboot-sign.hook`; `pacman -S --noconfirm systemd`
   fires `96-secureboot-sync-loader.hook`. Confirm re-signing actually happened by hashing the target
   file before/after, not just by reading the hook's own success log line.
+- Same tty/pipe rule applies to any remote `sudo` automation, not just `cryptsetup`: `echo pw | sudo
+  -S cmd` breaks stdin for whatever `cmd` itself needs to read from the terminal (same "Nothing to
+  read on input." failure). Use a real pty (`ssh -tt` + `expect`, or the `pty`+`select` pattern) and
+  type the sudo password as a keystroke, not a pipe. Nested quoting through
+  `ssh -tt … "sudo bash -c '...'"` chains is a real trap — a mangled password sent to `sudo` still
+  counts as a failed attempt. Enough of those can trip `pam_faillock` if it's active, locking the
+  account out of **both** `sudo` and SSH password auth, not just `sudo` — recoverable only via
+  `faillock --user <user> --reset` at the physical console (or an already-authenticated key-based
+  session). Prefer SSH keys over `sshpass` for repeated remote automation to avoid feeding an
+  account password through a fragile pipe repeatedly in the first place.
 - "Service enabled" is not "service configured." `systemctl is-enabled` passing doesn't mean a
   service did anything — verify actual state (`ip a`, on-disk config) after any
   network/service-provisioning change, not just that the unit is enabled.
