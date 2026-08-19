@@ -217,6 +217,17 @@ TIMELINE_CLEANUP="yes"
 NUMBER_CLEANUP="yes"
 NUMBER_LIMIT="5"
 EOF
+
+# Register the config with Arch's snapper service wrapper. Dropping a file
+# into /etc/snapper/configs/ alone isn't enough -- the snapper CLI and
+# snap-pac's pacman hooks read /etc/conf.d/snapper's SNAPPER_CONFIGS list
+# to know which configs exist; without this they silently see none, and
+# no snapshots are ever taken despite the config file being present.
+if [[ -f /etc/conf.d/snapper ]]; then
+  sed -i 's/^SNAPPER_CONFIGS=.*/SNAPPER_CONFIGS="root"/' /etc/conf.d/snapper
+else
+  echo 'SNAPPER_CONFIGS="root"' > /etc/conf.d/snapper
+fi
 ln -sfn /etc/snapper/configs/root /etc/snapper/config
 if in_chroot; then
   log_warn "Running in chroot → skipping snapperd start; enable timers after boot"
