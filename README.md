@@ -148,7 +148,7 @@ bash ./pre_install.sh
 - `pre_install.sh` enforces strong passwords: at least 8 characters, with upper and lower case letters and a number, and the root and user passwords must differ. Let the script prompt interactively if your values fail validation.
 - Timezone defaults to `Asia/Kolkata`, locale to `en_US.UTF-8`, and mirror countries to `India,Singapore,Germany,Netherlands`. Override any of these by exporting `TIMEZONE`, `LOCALE`, or `MIRROR_COUNTRIES` before running `pre_install.sh` — no script edits needed. `TIMEZONE` must match a path under `/usr/share/zoneinfo` (e.g. `America/New_York`), `LOCALE` must exist in `/usr/share/i18n/SUPPORTED` (e.g. `en_GB.UTF-8`), and `MIRROR_COUNTRIES` is a comma-separated Reflector country list (e.g. `United States,Canada`); the script validates all three up front and fails fast on typos.
 - CPU vendor is auto-detected: `pre_install.sh` installs `intel-ucode` or `amd-ucode` based on `/proc/cpuinfo`, and the generated loader entries reference whichever microcode image `mkinitcpio` actually staged on the ESP. No manual steps needed on AMD hardware.
-- Wired ethernet gets DHCP automatically: `pre_install.sh` enables `systemd-networkd`/`systemd-resolved`/`iwd` and writes `/etc/systemd/network/20-wired-dhcp.network` (matches `en*`/`eth*` interfaces). Wi-Fi still needs manual `iwctl` setup post-boot; non-standard interface naming needs a custom `.network` file.
+- Networking works automatically post-install: `pre_install.sh` installs and enables `NetworkManager` (Wi-Fi via `wpa_supplicant`, started on demand — no separate unit to enable) plus `systemd-resolved` for DNS. Wired interfaces get DHCP with no extra config; for Wi-Fi use `nmcli device wifi connect <SSID> --ask` or `nmtui` after first boot. `systemd-networkd`/`iwd` are intentionally not used, to avoid two managers fighting over the same interfaces.
 - Missed setting `TIMEZONE`/`LOCALE`/`MIRROR_COUNTRIES` before running? Change them after entering the chroot (see the next section) and before running `post_install.sh`:
   - `ln -sf /usr/share/zoneinfo/<Region>/<City> /etc/localtime`
   - Open `/etc/locale.gen` with `nano`, uncomment your locale, then run `locale-gen`
@@ -407,7 +407,7 @@ Expected:
 * **ZRAM not activating** → Run `systemctl restart swap.target` or check `/etc/systemd/zram-generator.conf`.
 * **Snapper services not starting** → Enable timers: `systemctl enable snapper-cleanup.timer`.
 * **Secure Boot validation fails** → Ensure MOK key is enrolled in firmware settings.
-* **Wired network not working post-install** → Ethernet gets DHCP automatically via `/etc/systemd/network/20-wired-dhcp.network` (installed by `pre_install.sh`). If your interface doesn't match `en*`/`eth*` (check with `ip link`), add a matching `.network` file and `systemctl restart systemd-networkd`. For Wi-Fi, authenticate with `iwctl` — it's never automatic.
+* **Network not working post-install** → Check `systemctl status NetworkManager` — it should be enabled and active (DHCP on wired is automatic once it's up). For Wi-Fi, connect with `nmcli device wifi connect "<SSID>" --ask` or `nmtui`; there's no automatic Wi-Fi join.
 * **Mirror download speeds slow** → Run `sudo reflector --country US,DE,JP --latest 20 --protocol https --sort rate --save /etc/pacman.d/mirrorlist`.
 
 ---
@@ -497,7 +497,7 @@ A: Yes. `pre_install.sh` partitions `$DISK` with `parted`, then reads back the r
 A: Yes, no manual steps needed. `pre_install.sh` detects the CPU vendor from `/proc/cpuinfo` and installs `amd-ucode` or `intel-ucode` accordingly; the generated loader entries reference whichever microcode image `mkinitcpio` actually staged on the ESP, so the boot entries always point at a file that exists.
 
 **Q: Does networking work right after install?**
-A: Wired ethernet does, via a DHCP profile `pre_install.sh` writes to `/etc/systemd/network/20-wired-dhcp.network` (matches `en*`/`eth*` interfaces). Wi-Fi does not — authenticate manually with `iwctl` after first boot; the packages needed are already installed.
+A: Wired ethernet does — `pre_install.sh` installs and enables `NetworkManager`, which brings up DHCP on Ethernet automatically. Wi-Fi does not auto-join — connect with `nmcli device wifi connect "<SSID>" --ask` or `nmtui` after first boot; `wpa_supplicant` is already installed as NetworkManager's backend.
 
 **Q: What if I forget my LUKS password?**
 A: Data is irrecoverable without the password. This is intentional full-disk encryption.

@@ -145,7 +145,7 @@ case "$(awk -F: '/vendor_id/{print $2; exit}' /proc/cpuinfo | tr -d ' ')" in
   *) log "WARNING: unrecognized CPU vendor_id, defaulting to intel-ucode" ;;
 esac
 log "Detected microcode package: $UCODE_PKG"
-packages=(base linux linux-lts linux-firmware btrfs-progs cryptsetup efibootmgr "$UCODE_PKG" snapper snap-pac sbsigntools zram-generator reflector vi less git openssl iwd nano sudo)
+packages=(base linux linux-lts linux-firmware btrfs-progs cryptsetup efibootmgr "$UCODE_PKG" snapper snap-pac sbsigntools zram-generator reflector vi less git openssl networkmanager wpa_supplicant nano sudo)
 pacman -Sy --noconfirm
 pacstrap /mnt "${packages[@]}"
 
@@ -290,20 +290,12 @@ cp /etc/sudoers /etc/sudoers.bak
 sed -i 's/^# %wheel ALL=(ALL:ALL) ALL/%wheel ALL=(ALL:ALL) ALL/' /etc/sudoers
 log "Sudo access configured for wheel group"
 
-# Enable essential network daemons
-systemctl enable systemd-networkd systemd-resolved iwd || true
-
-# Provision a default DHCP profile for wired interfaces. systemd-networkd
-# has no built-in catch-all match; without this file the service runs but
-# never brings an ethernet link up.
-mkdir -p /etc/systemd/network
-cat > /etc/systemd/network/20-wired-dhcp.network <<'EOF2'
-[Match]
-Name=en* eth*
-
-[Network]
-DHCP=yes
-EOF2
+# Enable essential network daemons. NetworkManager (backed by
+# wpa_supplicant for Wi-Fi, started automatically as needed — no separate
+# unit to enable) brings up DHCP on wired and wireless interfaces without
+# any extra config; systemd-networkd is intentionally left disabled to
+# avoid both managers fighting over the same interfaces.
+systemctl enable NetworkManager systemd-resolved || true
 
 # Seed reflector with preferred mirror configuration
 cat > /etc/reflector.conf <<EOF2
@@ -330,7 +322,7 @@ checks=0
 [[ -f "/boot/vmlinuz-linux" ]] && ((checks++)) && log "✓ Linux kernel installed"
 id "$NEWUSER" &>/dev/null && ((checks++)) && log "✓ User $NEWUSER exists"
 groups "$NEWUSER" | grep -q wheel && ((checks++)) && log "✓ User in wheel group"
-systemctl is-enabled systemd-networkd &>/dev/null && ((checks++)) && log "✓ Network services enabled"
+systemctl is-enabled NetworkManager &>/dev/null && ((checks++)) && log "✓ Network services enabled"
 
 echo "[INFO] Validation score: $checks/5"
 if [[ $checks -ge 4 ]]; then
