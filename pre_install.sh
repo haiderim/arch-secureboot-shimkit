@@ -153,7 +153,7 @@ case "$(awk -F: '/vendor_id/{print $2; exit}' /proc/cpuinfo | tr -d ' ')" in
   *) log "WARNING: unrecognized CPU vendor_id, defaulting to intel-ucode" ;;
 esac
 log "Detected microcode package: $UCODE_PKG"
-packages=(base linux linux-lts linux-firmware btrfs-progs cryptsetup efibootmgr "$UCODE_PKG" snapper snap-pac sbsigntools systemd-ukify zram-generator reflector vi less git openssl openssh networkmanager wpa_supplicant nano sudo)
+packages=(base linux linux-lts linux-firmware btrfs-progs cryptsetup efibootmgr "$UCODE_PKG" snapper snap-pac sbsigntools systemd-ukify zram-generator reflector vi less git openssl openssh networkmanager wpa_supplicant nano sudo sof-firmware man-db man-pages bash-completion pciutils usbutils wget rsync zellij vim btop)
 pacman -Sy --noconfirm
 pacstrap /mnt "${packages[@]}"
 
