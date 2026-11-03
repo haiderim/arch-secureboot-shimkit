@@ -49,34 +49,34 @@
                ▼
  ┌────────────────────────────┐
  │   Reboot into firmware     │
- │   choose "Arch (SecureBoot)"│
+ │  choose Arch (SecureBoot)  │
  └─────────────┬──────────────┘
                │
                ▼
  ┌────────────────────────────┐
  │   MokManager appears       │
- │  → Enroll \EFI\arch\keys\MOK.cer │
- │  → Reboot                   │
+ │  → Enroll keys\MOK.cer     │
+ │  → Reboot                  │
  └─────────────┬──────────────┘
                │
                ▼
  ┌────────────────────────────┐
  │   Arch boots via shim →    │
- │ systemd-boot → signed UKI   │
+ │ systemd-boot → signed UKI  │
  └─────────────┬──────────────┘
                │
                ▼
  ┌────────────────────────────┐
- │   Post-reboot tasks:       │
- │  enable snapper + zram     │
+ │   Post-reboot checks:      │
  │  verify Secure Boot state  │
+ │  verify snapper + zram     │
  └────────────────────────────┘
 ```
 
 ---
 
 This visual makes it clear:
-ISO → pre_install → chroot → post_install → reboot → MOK enrollment → boot → post-reboot setup.
+ISO → pre_install → chroot → post_install → reboot → MOK enrollment → boot → post-reboot checks.
 
 ## Quick Start
 
@@ -115,8 +115,8 @@ Run installation:
 export DISK=/dev/sda
 export TARGET_HOSTNAME=myhost
 export NEWUSER=myuser
-export ROOT_PASS='myrootpass'
-export USER_PASS='mynewuserpass'
+export ROOT_PASS='MyRootPass1'
+export USER_PASS='MyUserPass1'
 # Optional — override regional defaults (shown values are the script's defaults)
 export TIMEZONE=Asia/Kolkata
 export LOCALE=en_US.UTF-8
@@ -128,7 +128,8 @@ bash ./pre_install.sh
 
 **Script assumptions and defaults**
 
-- `pre_install.sh` enforces strong passwords: at least 8 characters, with upper and lower case letters and a number, and the root and user passwords must differ. Let the script prompt interactively if your values fail validation.
+- `pre_install.sh` enforces strong passwords: at least 8 characters, with upper and lower case letters and a number, and the root and user passwords must differ. If `ROOT_PASS` or `USER_PASS` is unset, the script prompts for it, and the same rules apply.
+- The hostname comes from `TARGET_HOSTNAME` (default `archhost`). `HOSTNAME` is ignored, because bash sets that variable itself.
 - Timezone defaults to `Asia/Kolkata`, locale to `en_US.UTF-8`, and mirror countries to `India,Singapore,Germany,Netherlands`. Override any of these by exporting `TIMEZONE`, `LOCALE`, or `MIRROR_COUNTRIES` before running `pre_install.sh` — no script edits needed. `TIMEZONE` must match a path under `/usr/share/zoneinfo` (e.g. `America/New_York`), `LOCALE` must exist in `/usr/share/i18n/SUPPORTED` (e.g. `en_GB.UTF-8`), and `MIRROR_COUNTRIES` is a comma-separated Reflector country list (e.g. `United States,Canada`); the script validates all three up front and fails fast on typos.
 - CPU vendor is auto-detected: `pre_install.sh` installs `intel-ucode` or `amd-ucode` based on `/proc/cpuinfo`, and mkinitcpio's `microcode` hook embeds it in the UKI. No manual steps needed on AMD hardware.
 - Clock stays correct after install: `pre_install.sh` sets the hardware clock once (`hwclock --systohc`) and enables `systemd-timesyncd` for continuous NTP sync going forward.
@@ -177,22 +178,21 @@ Clone the repo so `post_install.sh` can install the required hook and helper fil
 ```bash
 git clone https://github.com/haiderim/arch-secureboot-shimkit.git
 cd arch-secureboot-shimkit
-chmod +x pre_install.sh post_install.sh efi_cleanup.sh secureboot-sign-kernels.sh secureboot-sync-loader.sh secureboot-restore-hooks.sh
 ```
 
 Why clone instead of downloading only `pre_install.sh` and `post_install.sh`:
 
 * `post_install.sh` installs companion assets from the repo directory
-* The Secure Boot maintenance path now depends on seven extra files:
-* `95-secureboot-sign.hook`
-* `96-secureboot-sync-loader.hook`
-* `secureboot-sign-kernels.sh`
-* `secureboot-sync-loader.sh`
-* `secureboot-restore-hooks.sh`
-* `secureboot-post-rollback.service`
-* `secureboot-mkinitcpio-post`
+* The Secure Boot maintenance path depends on seven extra files:
+  * `95-secureboot-sign.hook`
+  * `96-secureboot-sync-loader.hook`
+  * `secureboot-sign-kernels.sh`
+  * `secureboot-sync-loader.sh`
+  * `secureboot-restore-hooks.sh`
+  * `secureboot-post-rollback.service`
+  * `secureboot-mkinitcpio-post`
 
-If those files are missing, `post_install.sh` will now stop with an error instead of continuing with an incomplete Secure Boot setup.
+If those files are missing, `post_install.sh` stops with an error instead of continuing with an incomplete Secure Boot setup.
 
 Run pre-install (from ISO):
 
@@ -200,8 +200,8 @@ Run pre-install (from ISO):
 export DISK=/dev/sda
 export TARGET_HOSTNAME=myhost
 export NEWUSER=myuser
-export ROOT_PASS='StrongRootPass'
-export USER_PASS='StrongUserPass'
+export ROOT_PASS='StrongRootPass1'
+export USER_PASS='StrongUserPass1'
 
 bash ./pre_install.sh
 ```
@@ -223,25 +223,31 @@ cryptsetup close cryptroot
 reboot
 ```
 
-Inside the chroot, take a moment to run `lsblk` or inspect `/etc` before starting `post_install.sh`. This is where you should apply regional changes (timezone/locale) noted earlier. Once the script reports success, run `exit`, unmount `/mnt`, close `cryptroot`, and reboot into firmware for MOK enrollment.
+Inside the chroot, take a moment to run `lsblk` or inspect `/etc` before starting `post_install.sh`. This is where you should apply regional changes (timezone/locale) noted earlier. Once the script reports success, run `exit`, unmount `/mnt`, close `cryptroot`, and reboot into firmware for MOK enrollment. The script exits non-zero if the signed boot chain isn't in place; don't reboot until that is fixed.
+
+Optional settings for `post_install.sh`:
+
+* `USER_NAME`: the account that builds `shim-signed` (default: first account with UID ≥ 1000)
+* `MOK_DIR`: where the signing keys live (default `/root/secureboot`), saved to `/etc/secureboot-shimkit.conf` for the hooks
+* `SHIM_SIGNED_REF`: the AUR commit of `shim-signed` to build (default: a pinned commit)
+* `ESP_MOUNT`: must be `/boot`, because the mkinitcpio presets and boot setup assume it
 
 **What happens automatically**:
 
 * MOK keys created at `/root/secureboot/`
-* `shim-signed` built (AUR) and installed
-* `shimx64.efi`, `MokManager.efi`, and signed `systemd-bootx64.efi` staged in `\EFI\arch`
-* Unified kernel images built in `/boot/EFI/Linux/` and signed, covering the kernel, initramfs, microcode and cmdline
-* **Automatic kernel signing and systemd-boot sync hooks installed** for future pacman updates
+* `shim-signed` built from a pinned AUR commit and installed
+* Shim, MokManager and signed `systemd-boot` staged in `\EFI\arch`, with a fallback copy in `\EFI\BOOT`
+* Unified kernel images in `/boot/EFI/Linux/` (built by `pre_install.sh`) signed, covering the kernel, initramfs, microcode and cmdline
+* **Automatic UKI signing and systemd-boot sync hooks installed** for future updates
 * **Boot-time safety net installed** (`secureboot-post-rollback.service`) to restore missing hooks and sign any unsigned UKI on every boot
 * Boot entry created: **Arch (SecureBoot)**
 * ZRAM configured (50% of RAM, zstd compression)
-* Snapper configured for Btrfs snapshots (timeline disabled, 5 snapshots max)
-* Boot permissions secured (700 on /boot and /boot/loader)
-* Reflector configured for optimal mirror selection
+* Snapper configured for Btrfs snapshots: `snap-pac` snapshots each pacman transaction, timeline disabled, 5 numbered snapshots kept
+* Boot permissions secured (`umask=0077` on the ESP)
 
 ### Automatic Signing And Loader Sync System
 
-The setup installs a pacman hook system for both kernels and the shim-loaded `systemd-boot` binary:
+The setup installs hooks for both UKIs and the shim-loaded `systemd-boot` binary:
 
 * `/etc/initcpio/post/secureboot-sign` signs each UKI whenever mkinitcpio builds one, including rebuilds caused by firmware or `systemd` updates
 * `95-secureboot-sign.hook` + `secureboot-sign-kernels.sh` check and sign UKIs after kernel package updates
@@ -249,7 +255,7 @@ The setup installs a pacman hook system for both kernels and the shim-loaded `sy
 
 `shim-signed` comes from the AUR, so `pacman -Syu` won't upgrade it. `post_install.sh` builds a pinned AUR commit; to update shim, review the newer package and re-run with `SHIM_SIGNED_REF=<commit> ./post_install.sh`, or use an AUR helper.
 
-If signing fails, pacman prints `error: command failed to execute correctly` but still exits 0, so don't chain `pacman -Syu && reboot`. Fix the error before rebooting: an unsigned kernel will not boot under Secure Boot.
+If signing fails, pacman prints `error: command failed to execute correctly` but still exits 0, so don't chain `pacman -Syu && reboot`. Fix the error before rebooting: an unsigned UKI will not boot under Secure Boot.
 
 This means:
 
@@ -261,7 +267,7 @@ This means:
 * Signing scripts include verification and error handling
 * Comprehensive logging for troubleshooting
 
-The kernel hook triggers whenever any package installs a kernel image, and the loader hook triggers on `systemd` upgrades. Together they keep both the kernel and the shim-loaded bootloader signed across normal system updates.
+The kernel hook triggers whenever any package installs a kernel image, and the loader hook triggers on `systemd` and `shim-signed` updates. Together with the post hook, they keep the UKIs and the shim-loaded bootloader signed across normal system updates.
 
 #### Boot-Time Safety Net
 
@@ -281,15 +287,18 @@ systemctl status secureboot-post-rollback.service
 
 Snapshots only cover the Btrfs subvolumes. UKIs live on the ESP, so after rolling back `@` the UKI may be newer than the modules on root. Boot, then run `pacman -S linux linux-lts` to rebuild and re-sign matching images. The cmdline is fixed to `rootflags=subvol=@`, so restore a snapshot by replacing `@` from the ISO; `snapper rollback` changes the default subvolume, which this cmdline ignores.
 
+> These rollback steps haven't been tested end to end yet, so try them on a non-critical system first.
+
 ---
 
 ## First Boot & MOK Enrollment
 
-At first boot, MokManager will launch:
+At first boot, shim shows `Verification failed: (0x1A) Security Violation`, because your key isn't trusted yet. This is expected.
 
-1. Select **Enroll key from disk**
-2. Navigate to `\EFI\arch\keys\MOK.cer`
-3. Enroll → reboot
+1. Select **OK**, then press any key within 10 seconds at **Press any key to perform MOK management**
+2. Select **Enroll key from disk**
+3. Navigate to `\EFI\arch\keys\MOK.cer`
+4. Enroll → reboot
 
 Now shim trusts your MOK, and systemd-boot will load signed UKIs and a signed bootloader binary.
 
@@ -297,14 +306,10 @@ Now shim trusts your MOK, and systemd-boot will load signed UKIs and a signed bo
 
 ## Post-Reboot Helper
 
-After successful boot:
+After a successful boot, zram and the Snapper cleanup timer are already active. To confirm:
 
 ```bash
-# Enable snapper + cleanup timers
-systemctl enable --now snapper-cleanup.timer
-systemctl enable --now snapperd.service 2>/dev/null || true
-
-# Verify zram
+systemctl status snapper-cleanup.timer
 swapon --show
 zramctl
 ```
@@ -342,6 +347,7 @@ Review the backup (`/root/esp-backup-*.tar.gz`) and restore manually if you want
 
 ```bash
 # Secure Boot status
+bootctl status | grep -i "secure boot"  # Should show "enabled (user)"
 mokutil --sb-state           # Should show "enabled"
 efibootmgr -v | grep "Arch (SecureBoot)"  # Should show shimx64.efi
 
@@ -357,11 +363,12 @@ ls -la /etc/pacman.d/hooks/95-secureboot-sign.hook  # Should exist and be readab
 ls -la /etc/pacman.d/hooks/96-secureboot-sync-loader.hook  # Should exist and be readable
 ls -la /usr/local/sbin/secureboot-sign-kernels.sh   # Should exist and be executable
 ls -la /usr/local/sbin/secureboot-sync-loader.sh    # Should exist and be executable
+ls -la /etc/initcpio/post/secureboot-sign           # Should exist and be executable
 cat /etc/pacman.d/hooks/95-secureboot-sign.hook     # Verify kernel hook configuration
 cat /etc/pacman.d/hooks/96-secureboot-sync-loader.hook  # Verify loader hook configuration
 
 # Test the signing system (optional)
-sudo /usr/local/sbin/secureboot-sign-kernels.sh      # Should report every kernel as signed and verified
+sudo /usr/local/sbin/secureboot-sign-kernels.sh      # Should report every UKI as signed and verified
 sudo /usr/local/sbin/secureboot-sync-loader.sh       # Should update/sign systemd-boot and exit successfully
 
 # ZRAM status
@@ -369,7 +376,7 @@ swapon --show | grep zram    # Should show ZRAM swap device
 zramctl                     # Should show ZRAM compression stats
 
 # Snapper configuration
-snapper -c root list-configs # Should show root config
+snapper list-configs         # Should show root config
 ls /.snapshots              # Should exist (timeline disabled but manual possible)
 ```
 
@@ -394,9 +401,11 @@ Expected:
 * **Rebooted before post-install** → Use Advanced Recovery section to re-enter chroot and rerun `post_install.sh`.
 * **MOK enrollment not appearing** → Reboot and select boot entry manually, firmware may need multiple reboots.
 * **Custom Btrfs layout** → Update Snapper config in `/etc/snapper/configs/root`.
-* **ZRAM not activating** → Run `systemctl restart swap.target` or check `/etc/systemd/zram-generator.conf`.
+* **ZRAM not activating** → Run `systemctl start systemd-zram-setup@zram0.service` or check `/etc/systemd/zram-generator.conf`.
 * **Snapper services not starting** → Enable timers: `systemctl enable snapper-cleanup.timer`.
-* **Secure Boot validation fails** → Ensure MOK key is enrolled in firmware settings.
+* **`post_install.sh` validation fails** → Fix each item marked `✗` in its output and re-run it before rebooting.
+* **Security Violation at boot after setup** → Enroll the MOK (see First Boot). If it is already enrolled, boot another entry or use Advanced Recovery, then run `secureboot-sign-kernels.sh`.
+* **`error: command failed to execute correctly` from pacman** → A signing hook failed. Run `secureboot-sign-kernels.sh` and fix what it reports before rebooting.
 * **Network not working post-install** → Check `systemctl status NetworkManager` — it should be enabled and active (DHCP on wired is automatic once it's up). For Wi-Fi, connect with `nmcli device wifi connect "<SSID>" --ask` or `nmtui`; there's no automatic Wi-Fi join.
 * **Mirror download speeds slow** → Run `sudo reflector --country US,DE,JP --latest 20 --protocol https --sort rate --save /etc/pacman.d/mirrorlist`.
 
@@ -457,7 +466,7 @@ A: A separate initramfs and loader-entry options sit unsigned on the unencrypted
 A: No. They are inside the UKI, and a mkinitcpio post hook signs it after every rebuild.
 
 **Q: Do I need to re-sign after updates?**
-A: No — pacman hooks handle it automatically. The setup installs two maintenance paths: `95-secureboot-sign.hook` with `secureboot-sign-kernels.sh` for kernel upgrades, and `96-secureboot-sync-loader.hook` with `secureboot-sync-loader.sh` for `systemd` upgrades. Together they keep both the kernels and the shim-loaded `systemd-boot` binary signed across `pacman -Syu`.
+A: No. A mkinitcpio post hook signs UKIs on every rebuild, `95-secureboot-sign.hook` checks them after kernel updates, and `96-secureboot-sync-loader.hook` re-signs `systemd-boot` after `systemd` updates. Watch for pacman errors, because a failed hook doesn't change pacman's exit code.
 
 **Q: What if I have multiple users?**
 A: `NEWUSER` (required, `pre_install.sh`) is the account created during install. `post_install.sh` runs later and auto-detects the admin user as the first UID ≥ 1000 account in `/etc/passwd` — if you created more than one user by hand before running it, pin the right one with `USER_NAME=youruser ./post_install.sh`.
@@ -466,10 +475,10 @@ A: `NEWUSER` (required, `pre_install.sh`) is the account created during install.
 A: `Asia/Kolkata`, `en_US.UTF-8`, and `India,Singapore,Germany,Netherlands` by default. Override any of them with `export TIMEZONE=...`, `export LOCALE=...`, or `export MIRROR_COUNTRIES="United States,Canada"` before running `pre_install.sh` — all three are validated up front and the script fails fast on a typo.
 
 **Q: Why is Snapper timeline creation disabled?**
-A: To conserve space, only manual snapshots are enabled by default with 5 snapshot limit.
+A: To conserve space. `snap-pac` still snapshots each pacman transaction, you can create manual snapshots, and cleanup keeps 5 numbered snapshots.
 
 **Q: How do I create manual Btrfs snapshots?**
-A: Use `sudo snapper create -d "Description"` or `sudo btrfs subvolume snapshot / /.snapshots/snapshot-`.
+A: Use `sudo snapper create -d "Description"`.
 
 **Q: Can I use this on NVMe drives?**
 A: Yes. `pre_install.sh` partitions `$DISK` with `parted`, then reads back the resulting partition device paths from `lsblk` instead of guessing a `sdX`/`nvmeXnYp` suffix. SATA, NVMe, and MMC all work with `DISK` set to the base device (e.g. `/dev/sda`, `/dev/nvme0n1`, `/dev/mmcblk0`) — no script edits required.
@@ -487,4 +496,4 @@ A: Data is irrecoverable without the password. This is intentional full-disk enc
 A: Both regular and LTS kernels are installed, and systemd-boot lists both automatically. Other kernels need a UKI too: in `/etc/mkinitcpio.d/<kernel>.preset`, comment out `default_image`, set `default_uki="/boot/EFI/Linux/arch-<kernel>.efi"`, then run `mkinitcpio -p <kernel>`.
 
 **Q: How do I move an older install from separate kernel files to UKIs?**
-A: Install `systemd-ukify`, put your current options in `/etc/kernel/cmdline`, edit both presets as above, and set `default arch-linux.efi` in `/boot/loader/loader.conf`. Re-run `post_install.sh`, check `sbverify` passes on the new UKIs, then delete the old files in `/boot/loader/entries/`.
+A: Install `systemd-ukify`, put your current options in `/etc/kernel/cmdline`, edit both presets as above, and set `default arch-linux.efi` in `/boot/loader/loader.conf`. Re-run `post_install.sh`, check `sbverify` passes on the new UKIs, then delete the old files in `/boot/loader/entries/`. These steps haven't been tested end to end yet, so keep a way to recover (see Advanced Recovery).

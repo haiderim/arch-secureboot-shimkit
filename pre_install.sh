@@ -320,5 +320,4 @@ else
 fi
 CHROOT_EOF
 
-log "Pre-install complete. System is ready for first boot!"
-log "Remember to reboot and remove installation media."
+log "Pre-install complete. Do NOT reboot yet: run post_install.sh in the chroot first."

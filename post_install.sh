@@ -261,7 +261,7 @@ else
 fi
 ln -sfn /etc/snapper/configs/root /etc/snapper/config
 if in_chroot; then
-  log_warn "Running in chroot → skipping snapperd start; enable timers after boot"
+  log_warn "Running in chroot → skipping snapperd start; cleanup timer will start on next boot"
   systemctl enable snapper-cleanup.timer || true
 else
   systemctl enable --now snapper-cleanup.timer
@@ -304,4 +304,4 @@ validate_secureboot() {
 }
 validate_secureboot
 
-log_info "Post-install complete. Reboot, enroll MOK, and enable services if needed."
+log_info "Post-install complete. Reboot and enroll the MOK."

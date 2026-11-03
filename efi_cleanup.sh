@@ -22,7 +22,7 @@ done
 echo "[EFI-CLEANUP] Re-adding Arch (SecureBoot) entry..."
 ESP_DEV="$(findmnt -no SOURCE -t vfat /boot)"
 ESP_DISK="/dev/$(lsblk -no pkname "$ESP_DEV")"
-ESP_PARTNUM="$(cat /sys/class/block/$(basename "$ESP_DEV")/partition)"
+ESP_PARTNUM="$(cat "/sys/class/block/$(basename "$ESP_DEV")/partition")"
 
 # Clear any existing Arch entries before recreating
 for num in $(efibootmgr | awk '/Arch \(SecureBoot\)/{print substr($1,5,4)}'); do

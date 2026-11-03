@@ -6,8 +6,8 @@ Guidance for agents working on this repo. Read this before editing `pre_install.
 
 Automates an Arch Linux install with Secure Boot via shim + MOK (for machines where Secure Boot
 cannot be disabled in firmware). `pre_install.sh` partitions/encrypts/installs from the Arch ISO;
-`post_install.sh` runs inside the chroot to build shim, sign the kernel/loader, and install pacman
-hooks that keep signatures current across updates.
+`post_install.sh` runs inside the chroot to build shim, sign the UKIs/loader, and install hooks
+that keep signatures current across updates.
 
 ## Script conventions
 
@@ -15,17 +15,18 @@ hooks that keep signatures current across updates.
   `validate_parameters()` before any destructive disk operation runs:
   `VAR="${VAR:-default}"` at the top, a fail-fast check in `validate_parameters()`. Never hardcode
   something a different machine/user would need to change (see `DISK`, `TARGET_HOSTNAME`, `NEWUSER`,
-  `TIMEZONE`, `LOCALE`, `MIRROR_COUNTRIES`).
+  `TIMEZONE`, `LOCALE`, `MIRROR_COUNTRIES`, `MOK_DIR`, `SHIM_SIGNED_REF`). Don't name one after a
+  variable bash sets itself: `HOSTNAME` never used its default. `ESP_MOUNT` must stay `/boot`, because
+  presets and boot setup assume it, and validation rejects anything else.
 - **Never guess device/partition naming or CPU vendor from a static default — derive from live
   state.** `EFI_PART`/`CRYPT_PART` come from `lsblk` output after partitioning, sorted explicitly by
   the `PARTN` column (actual GPT partition number) — not a string-concatenated suffix, and not
   `lsblk`'s emission order either, which is NOT guaranteed to match partition number (seen reversed
   on a disk that previously held a different partition table — silently swapped `EFI_PART`/
-  `CRYPT_PART` and broke the install). Don't reintroduce guessing,
-  or trust unsorted list order.
+  `CRYPT_PART` and broke the install). Don't reintroduce guessing, or trust unsorted list order.
 - **Network stack is NetworkManager + wpa_supplicant.** Enabled in `pre_install.sh`'s chroot phase
-  (`systemctl enable NetworkManager`, which also writes `/etc/resolv.conf`); `wpa_supplicant` is dbus-activated by
-  NetworkManager on demand, never enabled as its own unit. Do not reintroduce `iwd` or
+  (`systemctl enable NetworkManager`, which also writes `/etc/resolv.conf`); `wpa_supplicant` is
+  dbus-activated by NetworkManager on demand, never enabled as its own unit. Do not reintroduce `iwd` or
   `systemd-networkd` — two network managers on the same interfaces fight over DHCP/link state.
 - **Dropping a config file isn't enough — check whether the tool has a separate registry.**
   `post_install.sh` writes `/etc/snapper/configs/root` directly (Snapper has no `create-config` path
@@ -66,7 +67,8 @@ UEFI firmware/NVRAM, no Secure Boot state. Use QEMU/KVM — check `/dev/kvm` gro
 4. **Control**: QMP unix socket (`-qmp unix:...,server,nowait`) for `send-key`/`screendump`; SSH via
    `-netdev user,...,hostfwd=tcp::2222-:22` once you've set a root password and started sshd from
    the console (archiso auto-logs root on tty1, no password, but sshd isn't running by default and
-   the *installed* system has no openssh at all — console-only after first boot).
+   the *installed* system has no openssh at all — for test runs, `pacman -S openssh`, enable `sshd`
+   and add a key from the chroot).
 5. **Repo access in-guest**: `-fsdev local,...,security_model=mapped-xattr` +
    `-device virtio-9p-pci,fsdev=...,mount_tag=repo`, then in the guest
    `mount -t 9p -o trans=virtio,version=9p2000.L repo /root/repo`. Exec bits can be lost copying out
@@ -86,14 +88,21 @@ UEFI firmware/NVRAM, no Secure Boot state. Use QEMU/KVM — check `/dev/kvm` gro
   `MOK.cer` from the guest first — it's plaintext on the FAT32 ESP at
   `/boot/EFI/arch/keys/MOK.cer`. Confirm enforcement from inside the booted system:
   `bootctl status | grep -i 'secure boot'` must read `enabled (user)`, not merely "the VM booted".
-- `pacstrap`'d systems ship an empty `/etc/resolv.conf`. Before running `post_install.sh` in the
-  chroot (needs network for the AUR `shim-signed` build), copy the live ISO's resolver:
-  `cp /etc/resolv.conf /mnt/etc/resolv.conf` — the network namespace is shared with `arch-chroot`,
-  so the live environment's resolver stub is reachable from inside the chroot too.
+- The Arch ISO isn't signed, so install with the default Setup Mode vars, then enroll keys into a copy
+  of those vars with `--input`. Starting from pristine vars loses the NVRAM boot entry, which is a
+  useful way to test the `EFI/BOOT` fallback path: without a MOK it must reach MokManager.
+- `post_install.sh` needs network in the chroot for the AUR build. `arch-chroot` provides a working
+  resolver (confirmed on the 2026.11.01 ISO), so no manual `resolv.conf` copy is needed.
 - Verify pacman-hook behavior with **real transactions**, not by hand-invoking the sbin scripts:
-  `pacman -S --noconfirm linux` fires `95-secureboot-sign.hook`; `pacman -S --noconfirm systemd`
-  fires `96-secureboot-sync-loader.hook`. Confirm re-signing actually happened by hashing the target
-  file before/after, not just by reading the hook's own success log line.
+  `pacman -S --noconfirm linux` fires the post hook and `95-secureboot-sign.hook`; `pacman -S
+  --noconfirm systemd` rebuilds UKIs and fires `96-secureboot-sync-loader.hook`. Confirm re-signing
+  actually happened by hashing the UKI or `grubx64.efi` before/after and checking `sbverify --cert`,
+  not just by reading the hook's own success log line. To prove enforcement, corrupt a spare UKI,
+  `bootctl set-oneshot` it, and confirm it doesn't boot.
+- `bootctl update` exits 1 when the loader version is unchanged. That is why
+  `secureboot-sync-loader.sh` treats it as non-fatal; it also leaves shim at `EFI/BOOT` alone.
+- Not yet tested end to end: snapshot rollback and the older-install UKI migration in the README, and
+  anything on real hardware (including enrolling the key by hand in MokManager).
 - Same tty/pipe rule applies to any remote `sudo` automation, not just `cryptsetup`: `echo pw | sudo
   -S cmd` breaks stdin for whatever `cmd` itself needs to read from the terminal (same "Nothing to
   read on input." failure). Use a real pty (`ssh -tt` + `expect`, or the `pty`+`select` pattern) and
