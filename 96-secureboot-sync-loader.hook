@@ -3,8 +3,9 @@ Operation = Install
 Operation = Upgrade
 Type = Package
 Target = systemd
+Target = shim-signed
 
 [Action]
-Description = Update and sign systemd-boot for Secure Boot
+Description = Update shim and sign systemd-boot for Secure Boot
 When = PostTransaction
 Exec = /usr/local/sbin/secureboot-sync-loader.sh

@@ -24,8 +24,7 @@ trap handle_error ERR
 
 # --- Helper to detect whether we are running inside a chroot ---
 in_chroot() {
-    [[ -f /run/systemd/system ]] || return 0   # Treat missing systemd tree as evidence of a chroot
-    ! systemctl is-system-running --quiet
+    systemd-detect-virt --quiet --chroot
 }
 
 # --- Validate required parameters before continuing ---
@@ -56,13 +55,17 @@ chmod 700 "$ESP_MOUNT/loader" || true
 install -m 600 /dev/null "$ESP_MOUNT/loader/random-seed" 2>/dev/null || true
 chmod 600 "$ESP_MOUNT/loader/random-seed" || true
 
-ESP_DEV="$(findmnt -no SOURCE "$ESP_MOUNT")"
+# Filter by vfat: an automounted ESP also lists its autofs trigger ("systemd-1").
+ESP_DEV="$(findmnt -no SOURCE -t vfat "$ESP_MOUNT")"
 ESP_UUID="$(blkid -s UUID -o value "$ESP_DEV" || true)"
 if [[ -n "$ESP_UUID" ]]; then
   cp /etc/fstab "/etc/fstab.$(date +%Y%m%d-%H%M%S).bak"
-  sed -i 's@^\(.*[[:space:]]/boot[[:space:]].*\)$@# \1@g' /etc/fstab
-  grep -q "UUID=${ESP_UUID}[[:space:]]\+/boot" /etc/fstab || \
+  # Replace any active /boot entry. Patterns skip comments, so an entry that was
+  # just commented out can't be mistaken for the one this script needs to add.
+  grep -q "^UUID=${ESP_UUID}[[:space:]]\+/boot[[:space:]]\+vfat[[:space:]]\+umask=0077" /etc/fstab || {
+    sed -i 's@^\([^#].*[[:space:]]/boot[[:space:]].*\)$@# \1@' /etc/fstab
     echo "UUID=$ESP_UUID  /boot  vfat  umask=0077,shortname=mixed  0  2" >> /etc/fstab
+  }
   mount -o remount "$ESP_MOUNT" || true
 fi
 
@@ -83,16 +86,16 @@ install -d -m 755 "$ESP_MOUNT/EFI/arch/keys"
 install -m 644 "$MOK_DIR/MOK.cer" "$ESP_MOUNT/EFI/arch/keys/MOK.cer"
 
 # --- Build and install shim-signed from the AUR when needed ---
-if [[ ! -f /usr/share/shim-signed/shimx64.efi ]]; then
-  su - "$USER_NAME" -c '
-    set -e
-    rm -rf ~/shim-signed
-    git clone https://aur.archlinux.org/shim-signed.git ~/shim-signed
-    cd ~/shim-signed
-    makepkg -f --noconfirm
-  '
-  pacman -U --noconfirm "/home/$USER_NAME/shim-signed/"*.pkg.tar.*
-fi
+# Always fetch the current package: re-running this script is how a stale shim
+# (revoked, or lacking the Microsoft UEFI CA 2023 signature) gets replaced.
+su - "$USER_NAME" -c '
+  set -e
+  rm -rf ~/shim-signed
+  git clone https://aur.archlinux.org/shim-signed.git ~/shim-signed
+  cd ~/shim-signed
+  makepkg -f --noconfirm
+'
+pacman -U --noconfirm --needed "/home/$USER_NAME/shim-signed/"*.pkg.tar.*
 
 SHIM_SRC="/usr/share/shim-signed"
 install -d -m 755 "$ESP_MOUNT/EFI/arch" "$ESP_MOUNT/EFI/BOOT"
@@ -100,6 +103,8 @@ install -m 644 "$SHIM_SRC/shimx64.efi" "$ESP_MOUNT/EFI/arch/shimx64.efi"
 install -m 644 "$SHIM_SRC/mmx64.efi"   "$ESP_MOUNT/EFI/arch/mmx64.efi"
 install -m 644 "$SHIM_SRC/mmx64.efi"   "$ESP_MOUNT/EFI/arch/MokManager.efi"
 install -m 644 "$SHIM_SRC/shimx64.efi" "$ESP_MOUNT/EFI/BOOT/BOOTX64.EFI"
+# Shim looks for MokManager next to itself, so the fallback path needs a copy.
+install -m 644 "$SHIM_SRC/mmx64.efi"   "$ESP_MOUNT/EFI/BOOT/mmx64.efi"
 
 # --- Sign systemd-boot and expose it as grubx64.efi ---
 if [[ -f "$ESP_MOUNT/EFI/systemd/systemd-bootx64.efi" ]]; then
@@ -125,6 +130,11 @@ done
 # --- Install pacman hooks for automatic signing/loader sync ---
 mkdir -p /etc/pacman.d/hooks
 mkdir -p /usr/local/sbin
+
+# Hooks run with a clean environment: persist non-default paths for them.
+# Assign-if-unset syntax so an explicit env var still overrides the file.
+install -m 644 /dev/null /etc/secureboot-shimkit.conf
+printf ': "${MOK_DIR:=%q}"\n: "${ESP_MOUNT:=%q}"\n' "$MOK_DIR" "$ESP_MOUNT" > /etc/secureboot-shimkit.conf
 
 # Install hook files from the current directory
 if [[ -f "$(dirname "$0")/95-secureboot-sign.hook" ]]; then
@@ -183,9 +193,9 @@ fi
 # --- Recreate a single Arch (SecureBoot) boot entry ---
 ESP_DISK="/dev/$(lsblk -no pkname "$ESP_DEV")"
 ESP_PARTNUM="$(cat "/sys/class/block/$(basename "$ESP_DEV")/partition")"
-while efibootmgr | grep -q "Arch (SecureBoot)"; do
-  BOOTNUM=$(efibootmgr | grep "Arch (SecureBoot)" | head -n1 | awk '{print $1}' | tr -d '*')
-  [[ -n "$BOOTNUM" ]] && efibootmgr -b "${BOOTNUM}" -B || break
+# efibootmgr -b takes bare hex ("0003"), not the "Boot0003*" label it prints.
+for BOOTNUM in $(efibootmgr | awk '/Arch \(SecureBoot\)/{print substr($1,5,4)}'); do
+  efibootmgr -q -b "$BOOTNUM" -B || log_warn "Could not remove boot entry $BOOTNUM"
 done
 efibootmgr -c -d "$ESP_DISK" -p "$ESP_PARTNUM" \
   -L "Arch (SecureBoot)" \
@@ -202,7 +212,7 @@ EOF
 if in_chroot; then
   log_warn "Running in chroot → skipping ZRAM activation; will auto-start on next boot"
 else
-  systemctl daemon-reexec && systemctl restart swap.target || log_warn "ZRAM activation failed"
+  { systemctl daemon-reload && systemctl start systemd-zram-setup@zram0.service; } || log_warn "ZRAM activation failed"
 fi
 
 # --- Configure Snapper policy and timers ---

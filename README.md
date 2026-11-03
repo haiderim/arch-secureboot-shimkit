@@ -95,7 +95,7 @@ If you're new to the Arch installer, make sure you cover these basics before run
    Replace `wlan0` and `"YourSSID"` with the values shown by `device list` and `station ... get-networks`.
 3. Keep the machine on AC power and disable any firmware sleep timers so the install is not interrupted.
 4. Back up anything important on the disk you plan to reuse—the next steps destroy its current partition table.
-5. Write down the values you will pass to the scripts (`DISK`, `HOSTNAME`, `NEWUSER`, `ROOT_PASS`, `USER_PASS`) so you can paste them without guesswork.
+5. Write down the values you will pass to the scripts (`DISK`, `TARGET_HOSTNAME`, `NEWUSER`, `ROOT_PASS`, `USER_PASS`) so you can paste them without guesswork.
 
 Once those prerequisites are satisfied, start with the checks below.
 
@@ -130,7 +130,7 @@ Run installation:
 ```bash
 # Set environment variables (adjust as needed)
 export DISK=/dev/sda
-export HOSTNAME=myhost
+export TARGET_HOSTNAME=myhost
 export NEWUSER=myuser
 export ROOT_PASS='myrootpass'
 export USER_PASS='mynewuserpass'
@@ -154,7 +154,7 @@ bash ./pre_install.sh
   - `ln -sf /usr/share/zoneinfo/<Region>/<City> /etc/localtime`
   - Open `/etc/locale.gen` with `nano`, uncomment your locale, then run `locale-gen`
   - Write your locale to `/etc/locale.conf`, for example `echo 'LANG=en_GB.UTF-8' > /etc/locale.conf`
-  - Edit `/etc/reflector.conf` to replace the preconfigured countries with ones nearer to you
+  - Edit `/etc/xdg/reflector/reflector.conf` to replace the preconfigured countries with ones nearer to you
 
 ---
 
@@ -181,7 +181,7 @@ Make sure you have everything below sorted before you touch the scripts:
 * Firmware access to the machine so you can choose the USB device and, if necessary, disable any temporary boot restrictions.
 * Reliable internet. Wired connections come up automatically; for Wi-Fi you can use `iwctl` (commands shown above) before running the scripts.
 * A recent backup of anything important on the target disk—`pre_install.sh` wipes it without additional prompts.
-* The values you plan to use for `DISK`, `HOSTNAME`, `NEWUSER`, `ROOT_PASS`, and `USER_PASS` written down or copied somewhere safe.
+* The values you plan to use for `DISK`, `TARGET_HOSTNAME`, `NEWUSER`, `ROOT_PASS`, and `USER_PASS` written down or copied somewhere safe.
 * AC power (or a fully charged battery) so the installation cannot be interrupted halfway through.
 * On the live ISO, `curl` is already installed. Use it to download the scripts, or install `wget` manually if you prefer that tool. Inside the chroot the scripts install the rest of the required packages automatically.
 
@@ -214,7 +214,7 @@ Run pre-install (from ISO):
 
 ```bash
 export DISK=/dev/sda
-export HOSTNAME=myhost
+export TARGET_HOSTNAME=myhost
 export NEWUSER=myuser
 export ROOT_PASS='StrongRootPass'
 export USER_PASS='StrongUserPass'
@@ -260,7 +260,11 @@ Inside the chroot, take a moment to run `lsblk` or inspect `/etc` before startin
 The setup installs a pacman hook system for both kernels and the shim-loaded `systemd-boot` binary:
 
 * `95-secureboot-sign.hook` + `secureboot-sign-kernels.sh` sign new kernels after kernel package updates
-* `96-secureboot-sync-loader.hook` + `secureboot-sync-loader.sh` refresh and re-sign `systemd-boot` after `systemd` package updates
+* `96-secureboot-sync-loader.hook` + `secureboot-sync-loader.sh` refresh and re-sign `systemd-boot`, and copy shim and MokManager to the ESP, after `systemd` or `shim-signed` package updates
+
+`shim-signed` comes from the AUR, so `pacman -Syu` won't upgrade it. Update it with an AUR helper, or re-run `post_install.sh`, which always fetches the current package.
+
+If signing fails, the hook exits non-zero and pacman prints an error for it. Fix this before rebooting: an unsigned kernel will not boot under Secure Boot.
 
 This means:
 

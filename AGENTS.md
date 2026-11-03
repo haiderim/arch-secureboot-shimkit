@@ -14,7 +14,7 @@ hooks that keep signatures current across updates.
 - **Every user-configurable value is an env var with a sensible default**, validated up front in
   `validate_parameters()` before any destructive disk operation runs:
   `VAR="${VAR:-default}"` at the top, a fail-fast check in `validate_parameters()`. Never hardcode
-  something a different machine/user would need to change (see `DISK`, `HOSTNAME`, `NEWUSER`,
+  something a different machine/user would need to change (see `DISK`, `TARGET_HOSTNAME`, `NEWUSER`,
   `TIMEZONE`, `LOCALE`, `MIRROR_COUNTRIES`).
 - **Never guess device/partition naming or CPU vendor from a static default — derive from live
   state.** `EFI_PART`/`CRYPT_PART` come from `lsblk` output after partitioning, sorted explicitly by

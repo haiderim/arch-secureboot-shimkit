@@ -1,6 +1,9 @@
 #!/bin/bash
 set -euo pipefail
 
+# Installed by post_install.sh; hooks run with a clean environment, so custom
+# MOK_DIR/ESP_MOUNT values must be persisted here. An explicit env var still wins.
+[[ -r /etc/secureboot-shimkit.conf ]] && . /etc/secureboot-shimkit.conf
 MOK_DIR="${MOK_DIR:-/root/secureboot}"
 ESP_MOUNT="${ESP_MOUNT:-/boot}"
 
@@ -58,9 +61,24 @@ mv -f "$tmp" "$dst"
 install -m 644 "$dst" "$fallback"
 
 if command -v sbverify >/dev/null 2>&1; then
-  if sbverify --list "$dst" >/dev/null 2>&1; then
+  # --list exits 0 even on unsigned images; --cert really checks the signature.
+  if sbverify --cert "$MOK_DIR/MOK.crt" "$dst" >/dev/null 2>&1; then
     log_info "Verified signature on $dst"
   else
-    log_warn "Signature verification failed for $dst"
+    log_error "Signature verification failed for $dst"
+    exit 1
   fi
+fi
+
+# Keep shim and MokManager on the ESP in step with the installed shim-signed.
+shim_src="/usr/share/shim-signed"
+if [[ -f "$shim_src/shimx64.efi" && -f "$shim_src/mmx64.efi" ]]; then
+  log_info "Refreshing shim and MokManager on $ESP_MOUNT"
+  install -m 644 "$shim_src/shimx64.efi" "$ESP_MOUNT/EFI/arch/shimx64.efi"
+  install -m 644 "$shim_src/mmx64.efi"   "$ESP_MOUNT/EFI/arch/mmx64.efi"
+  install -m 644 "$shim_src/mmx64.efi"   "$ESP_MOUNT/EFI/arch/MokManager.efi"
+  install -m 644 "$shim_src/shimx64.efi" "$ESP_MOUNT/EFI/BOOT/BOOTX64.EFI"
+  install -m 644 "$shim_src/mmx64.efi"   "$ESP_MOUNT/EFI/BOOT/mmx64.efi"
+else
+  log_warn "shim-signed package files not found in $shim_src; leaving shim on the ESP unchanged"
 fi

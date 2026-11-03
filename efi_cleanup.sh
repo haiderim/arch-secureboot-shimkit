@@ -20,7 +20,7 @@ done
 
 # --- Recreate a single Arch (SecureBoot) entry ---
 echo "[EFI-CLEANUP] Re-adding Arch (SecureBoot) entry..."
-ESP_DEV="$(findmnt -no SOURCE /boot)"
+ESP_DEV="$(findmnt -no SOURCE -t vfat /boot)"
 ESP_DISK="/dev/$(lsblk -no pkname "$ESP_DEV")"
 ESP_PARTNUM="$(cat /sys/class/block/$(basename "$ESP_DEV")/partition)"
 

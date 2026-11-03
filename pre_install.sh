@@ -5,7 +5,8 @@ log(){ echo "[pre-install] $*"; }
 
 # --- Required environment inputs (set via env or prompts) ---
 DISK="${DISK:-}"
-HOSTNAME="${HOSTNAME:-archhost}"
+# Not named HOSTNAME: bash presets that variable, so a default would never apply.
+TARGET_HOSTNAME="${TARGET_HOSTNAME:-archhost}"
 NEWUSER="${NEWUSER:-}"
 TIMEZONE="${TIMEZONE:-Asia/Kolkata}"
 LOCALE="${LOCALE:-en_US.UTF-8}"
@@ -48,6 +49,7 @@ ROOT_PASS="${ROOT_PASS:-$(get_secure_password "Root password")}"
 USER_PASS="${USER_PASS:-$(get_secure_password "User password for $NEWUSER")}"
 
 log "Target disk: $DISK"
+log "Target hostname: $TARGET_HOSTNAME"
 
 # --- Helper routines to validate inputs and disk state ---
 validate_disk() {
@@ -67,13 +69,13 @@ validate_password() {
 
 validate_parameters() {
     [[ -n "$DISK" ]] || { echo "ERROR: DISK parameter is required" >&2; exit 1; }
-    [[ -n "$HOSTNAME" ]] || { echo "ERROR: HOSTNAME parameter is required" >&2; exit 1; }
+    [[ -n "$TARGET_HOSTNAME" ]] || { echo "ERROR: TARGET_HOSTNAME parameter is required" >&2; exit 1; }
     [[ -n "$NEWUSER" ]] || { echo "ERROR: NEWUSER parameter is required" >&2; exit 1; }
     [[ -n "$ROOT_PASS" ]] || { echo "ERROR: ROOT_PASS parameter is required" >&2; exit 1; }
     [[ -n "$USER_PASS" ]] || { echo "ERROR: USER_PASS parameter is required" >&2; exit 1; }
     validate_disk "$DISK"
     [[ "$NEWUSER" =~ ^[a-z_][a-z0-9_-]*$ ]] || { echo "ERROR: Invalid username format" >&2; exit 1; }
-    [[ "$HOSTNAME" =~ ^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?$ ]] || { echo "ERROR: Invalid hostname format" >&2; exit 1; }
+    [[ "$TARGET_HOSTNAME" =~ ^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?$ ]] || { echo "ERROR: Invalid hostname format" >&2; exit 1; }
     validate_password "$ROOT_PASS" "Root"
     validate_password "$USER_PASS" "User"
     [[ "$ROOT_PASS" != "$USER_PASS" ]] || { echo "ERROR: Root and user passwords must be different" >&2; exit 1; }
@@ -159,7 +161,7 @@ genfstab -U /mnt >> /mnt/etc/fstab
 log "Entering chroot to configure system"
 arch-chroot /mnt /usr/bin/env \
   PATH="/usr/local/sbin:/usr/local/bin:/usr/bin:/sbin:/bin" \
-  HOSTNAME="${HOSTNAME}" \
+  TARGET_HOSTNAME="${TARGET_HOSTNAME}" \
   NEWUSER="${NEWUSER}" \
   ROOT_PASS="${ROOT_PASS}" \
   USER_PASS="${USER_PASS}" \
@@ -175,7 +177,7 @@ log(){ echo "[chroot] $*"; }
 
 log "Starting chroot configuration..."
 log "Environment check:"
-log "  HOSTNAME: $HOSTNAME"
+log "  TARGET_HOSTNAME: $TARGET_HOSTNAME"
 log "  NEWUSER: $NEWUSER" 
 log "  CRYPT_PART: $CRYPT_PART"
 log "  TIMEZONE: $TIMEZONE"
@@ -188,7 +190,7 @@ grep -q "^#${LOCALE} " /etc/locale.gen || { log "ERROR: LOCALE '$LOCALE' not fou
 sed -i "s/^#${LOCALE} /${LOCALE} /" /etc/locale.gen
 locale-gen
 echo "LANG=${LOCALE}" > /etc/locale.conf
-echo "$HOSTNAME" > /etc/hostname
+echo "$TARGET_HOSTNAME" > /etc/hostname
 
 # Configure initramfs hooks for encrypted Btrfs
 perl -0777 -pe 's/^HOOKS=.*$/HOOKS=(base udev autodetect microcode modconf kms keyboard keymap block encrypt filesystems btrfs fsck)/m' -i /etc/mkinitcpio.conf
@@ -219,13 +221,17 @@ initrd  /initramfs-linux.img
 options cryptdevice=UUID=$ROOT_UUID:cryptroot root=/dev/mapper/cryptroot rootflags=subvol=@ rw
 EOF2
 
-cat > /boot/loader/entries/arch-fallback.conf <<EOF2
+# Current mkinitcpio presets build no fallback image by default; only offer a
+# menu entry when the image it references actually exists.
+if [[ -f /boot/initramfs-linux-fallback.img ]]; then
+  cat > /boot/loader/entries/arch-fallback.conf <<EOF2
 title   Arch Linux (Fallback)
 linux   /vmlinuz-linux
 $UCODE_INITRD
 initrd  /initramfs-linux-fallback.img
 options cryptdevice=UUID=$ROOT_UUID:cryptroot root=/dev/mapper/cryptroot rootflags=subvol=@ rw
 EOF2
+fi
 
 if [[ -f /boot/vmlinuz-linux-lts ]]; then
   cat > /boot/loader/entries/arch-lts.conf <<EOF2
@@ -235,13 +241,15 @@ $UCODE_INITRD
 initrd  /initramfs-linux-lts.img
 options cryptdevice=UUID=$ROOT_UUID:cryptroot root=/dev/mapper/cryptroot rootflags=subvol=@ rw
 EOF2
-  cat > /boot/loader/entries/arch-lts-fallback.conf <<EOF2
+  if [[ -f /boot/initramfs-linux-lts-fallback.img ]]; then
+    cat > /boot/loader/entries/arch-lts-fallback.conf <<EOF2
 title   Arch Linux (LTS Fallback)
 linux   /vmlinuz-linux-lts
 $UCODE_INITRD
 initrd  /initramfs-linux-lts-fallback.img
 options cryptdevice=UUID=$ROOT_UUID:cryptroot root=/dev/mapper/cryptroot rootflags=subvol=@ rw
 EOF2
+  fi
 fi
 
 # --- Create administrative user and configure access ---
@@ -302,9 +310,11 @@ log "Sudo access configured for wheel group"
 systemctl enable NetworkManager systemd-resolved || true
 
 # Seed reflector with preferred mirror configuration
-cat > /etc/reflector.conf <<EOF2
+# reflector.service reads this exact path; the file is parsed with shlex, so
+# the country list must be quoted (names like "United States" contain spaces).
+cat > /etc/xdg/reflector/reflector.conf <<EOF2
 --save /etc/pacman.d/mirrorlist
---country ${MIRROR_COUNTRIES}
+--country "${MIRROR_COUNTRIES}"
 --protocol http
 --latest 10
 --sort rate

@@ -5,6 +5,9 @@ set -euo pipefail
 # This script signs all kernels on the ESP after pacman updates
 
 # Configuration
+# Installed by post_install.sh; hooks run with a clean environment, so custom
+# MOK_DIR/ESP_MOUNT values must be persisted here. An explicit env var still wins.
+[[ -r /etc/secureboot-shimkit.conf ]] && . /etc/secureboot-shimkit.conf
 MOK_DIR="${MOK_DIR:-/root/secureboot}"
 ESP_MOUNT="${ESP_MOUNT:-/boot}"
 
@@ -15,9 +18,9 @@ log_warn() { echo "[WARN] [secureboot-sign] $*" >&2; }
 
 # Check if Secure Boot environment is set up
 if [[ ! -f "$MOK_DIR/MOK.key" || ! -f "$MOK_DIR/MOK.crt" ]]; then
-  log_error "MOK keys not found at $MOK_DIR. Skipping kernel signing."
+  log_error "MOK keys not found at $MOK_DIR. Kernels were NOT signed and will not boot under Secure Boot."
   log_error "Run the post_install.sh script first to set up Secure Boot."
-  exit 0
+  exit 1
 fi
 
 if ! command -v sbsign >/dev/null 2>&1; then
@@ -73,14 +76,24 @@ if command -v sbverify >/dev/null 2>&1; then
   verified_count=0
   for k in "$ESP_MOUNT"/vmlinuz-*; do
     if [[ -f "$k" ]]; then
-      if sbverify --list "$k" >/dev/null 2>&1; then
+      # --list exits 0 even on unsigned images; --cert really checks the signature.
+      if sbverify --cert "$MOK_DIR/MOK.crt" "$k" >/dev/null 2>&1; then
         ((verified_count++)) || true
       else
-        log_warn "Signature verification failed for $k"
+        log_error "Signature verification failed for $k"
       fi
     fi
   done
   log_info "Signature verification: $verified_count/$kernel_count kernels verified"
+  if [[ $verified_count -ne $kernel_count ]]; then
+    log_error "Some kernels will not boot under Secure Boot."
+    exit 1
+  fi
+fi
+
+if [[ $signed_count -ne $kernel_count ]]; then
+  log_error "Failed to sign $((kernel_count - signed_count)) kernel(s); they will not boot under Secure Boot."
+  exit 1
 fi
 
 exit 0
