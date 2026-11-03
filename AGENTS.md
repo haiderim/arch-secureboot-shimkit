@@ -14,7 +14,7 @@ that keep signatures current across updates.
 - **Every user-configurable value is an env var with a sensible default**, validated up front in
   `validate_parameters()` before any destructive disk operation runs:
   `VAR="${VAR:-default}"` at the top, a fail-fast check in `validate_parameters()`. Never hardcode
-  something a different machine/user would need to change (see `DISK`, `TARGET_HOSTNAME`, `NEWUSER`,
+  something a different machine/user would need to change (see `DISK`, `TARGET_HOSTNAME`, `NEWUSER`, `IMPORT_WIFI`,
   `TIMEZONE`, `LOCALE`, `MIRROR_COUNTRIES`, `MOK_DIR`, `SHIM_SIGNED_REF`). Don't name one after a
   variable bash sets itself: `HOSTNAME` never used its default. `ESP_MOUNT` must stay `/boot`, because
   presets and boot setup assume it, and validation rejects anything else.
@@ -24,6 +24,8 @@ that keep signatures current across updates.
   `lsblk`'s emission order either, which is NOT guaranteed to match partition number (seen reversed
   on a disk that previously held a different partition table — silently swapped `EFI_PART`/
   `CRYPT_PART` and broke the install). Don't reintroduce guessing, or trust unsorted list order.
+- **Don't leave a machine unreachable.** `sshd` is enabled by default, and `pre_install.sh` converts
+  the ISO's `iwd` Wi-Fi profile into a NetworkManager keyfile, since `iwd` isn't on the installed system.
 - **Network stack is NetworkManager + wpa_supplicant.** Enabled in `pre_install.sh`'s chroot phase
   (`systemctl enable NetworkManager`, which also writes `/etc/resolv.conf`); `wpa_supplicant` is
   dbus-activated by NetworkManager on demand, never enabled as its own unit. Do not reintroduce `iwd` or
@@ -67,8 +69,8 @@ UEFI firmware/NVRAM, no Secure Boot state. Use QEMU/KVM — check `/dev/kvm` gro
 4. **Control**: QMP unix socket (`-qmp unix:...,server,nowait`) for `send-key`/`screendump`; SSH via
    `-netdev user,...,hostfwd=tcp::2222-:22` once you've set a root password and started sshd from
    the console (archiso auto-logs root on tty1, no password, but sshd isn't running by default and
-   the *installed* system has no openssh at all — for test runs, `pacman -S openssh`, enable `sshd`
-   and add a key from the chroot).
+   the *installed* system runs `sshd` but refuses root password login — for test runs, add a key
+   to `/root/.ssh/authorized_keys` from the chroot, or log in as `NEWUSER`).
 5. **Repo access in-guest**: `-fsdev local,...,security_model=mapped-xattr` +
    `-device virtio-9p-pci,fsdev=...,mount_tag=repo`, then in the guest
    `mount -t 9p -o trans=virtio,version=9p2000.L repo /root/repo`. Exec bits can be lost copying out
@@ -101,8 +103,11 @@ UEFI firmware/NVRAM, no Secure Boot state. Use QEMU/KVM — check `/dev/kvm` gro
   `bootctl set-oneshot` it, and confirm it doesn't boot.
 - `bootctl update` exits 1 when the loader version is unchanged. That is why
   `secureboot-sync-loader.sh` treats it as non-fatal; it also leaves shim at `EFI/BOOT` alone.
-- Not yet tested end to end: snapshot rollback and the older-install UKI migration in the README, and
-  anything on real hardware (including enrolling the key by hand in MokManager).
+- Real hardware: a Lenovo 20KES5JL1A booted with Secure Boot enforced (Nov 2026), including enrolling
+  the key by hand in MokManager. Its install ran over ISO Wi-Fi, where a slow mirror failed
+  `post_install.sh` once; re-running it fixed that.
+- Not yet tested end to end: snapshot rollback, the older-install UKI migration in the README, the LTS
+  UKI and kernel updates on real hardware, and machines that only trust the 2023 CA.
 - Same tty/pipe rule applies to any remote `sudo` automation, not just `cryptsetup`: `echo pw | sudo
   -S cmd` breaks stdin for whatever `cmd` itself needs to read from the terminal (same "Nothing to
   read on input." failure). Use a real pty (`ssh -tt` + `expect`, or the `pty`+`select` pattern) and

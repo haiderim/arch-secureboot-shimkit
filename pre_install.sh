@@ -11,6 +11,8 @@ NEWUSER="${NEWUSER:-}"
 TIMEZONE="${TIMEZONE:-Asia/Kolkata}"
 LOCALE="${LOCALE:-en_US.UTF-8}"
 MIRROR_COUNTRIES="${MIRROR_COUNTRIES:-India,Singapore,Germany,Netherlands}"
+# Copy the Wi-Fi network the live ISO is connected to into the installed system.
+IMPORT_WIFI="${IMPORT_WIFI:-yes}"
 
 # Ensure NEWUSER is provided and not set to root
 if [[ -z "$NEWUSER" ]]; then
@@ -82,6 +84,7 @@ validate_parameters() {
     [[ -f "/usr/share/zoneinfo/$TIMEZONE" ]] || { echo "ERROR: Unknown TIMEZONE '$TIMEZONE' (expected e.g. 'Region/City', see /usr/share/zoneinfo)" >&2; exit 1; }
     grep -qE "^#?${LOCALE//./\\.} " /usr/share/i18n/SUPPORTED 2>/dev/null || { echo "ERROR: Unknown LOCALE '$LOCALE' (expected e.g. 'en_US.UTF-8', see /usr/share/i18n/SUPPORTED)" >&2; exit 1; }
     [[ "$MIRROR_COUNTRIES" =~ ^[A-Za-z\ ]+(,[A-Za-z\ ]+)*$ ]] || { echo "ERROR: MIRROR_COUNTRIES must be a comma-separated country name list" >&2; exit 1; }
+    [[ "$IMPORT_WIFI" == "yes" || "$IMPORT_WIFI" == "no" ]] || { echo "ERROR: IMPORT_WIFI must be 'yes' or 'no'" >&2; exit 1; }
     log "All parameters validated successfully"
 }
 
@@ -150,7 +153,7 @@ case "$(awk -F: '/vendor_id/{print $2; exit}' /proc/cpuinfo | tr -d ' ')" in
   *) log "WARNING: unrecognized CPU vendor_id, defaulting to intel-ucode" ;;
 esac
 log "Detected microcode package: $UCODE_PKG"
-packages=(base linux linux-lts linux-firmware btrfs-progs cryptsetup efibootmgr "$UCODE_PKG" snapper snap-pac sbsigntools systemd-ukify zram-generator reflector vi less git openssl networkmanager wpa_supplicant nano sudo)
+packages=(base linux linux-lts linux-firmware btrfs-progs cryptsetup efibootmgr "$UCODE_PKG" snapper snap-pac sbsigntools systemd-ukify zram-generator reflector vi less git openssl openssh networkmanager wpa_supplicant nano sudo)
 pacman -Sy --noconfirm
 pacstrap /mnt "${packages[@]}"
 
@@ -280,7 +283,7 @@ log "Sudo access configured for wheel group"
 # and writes /etc/resolv.conf itself, so systemd-resolved isn't needed;
 # systemd-networkd is intentionally left disabled to avoid both managers
 # fighting over the same interfaces.
-systemctl enable NetworkManager
+systemctl enable NetworkManager sshd
 
 # Seed reflector with preferred mirror configuration
 # reflector.service reads this exact path; the file is parsed with shlex, so
@@ -309,7 +312,7 @@ checks=0
 [[ -f "/boot/EFI/Linux/arch-linux.efi" ]] && ((++checks)) && log "✓ Unified kernel image built"
 id "$NEWUSER" &>/dev/null && ((++checks)) && log "✓ User $NEWUSER exists"
 groups "$NEWUSER" | grep -q wheel && ((++checks)) && log "✓ User in wheel group"
-systemctl is-enabled NetworkManager &>/dev/null && ((++checks)) && log "✓ Network services enabled"
+systemctl is-enabled NetworkManager &>/dev/null && systemctl is-enabled sshd &>/dev/null && ((++checks)) && log "✓ Network and SSH services enabled"
 
 echo "[INFO] Validation score: $checks/5"
 if [[ $checks -eq 5 ]]; then
@@ -319,5 +322,40 @@ else
     exit 1
 fi
 CHROOT_EOF
+
+# Wired networks need no profile, and the installed system has no iwd, so an
+# ISO Wi-Fi connection must be converted for NetworkManager. Never fatal: Wi-Fi
+# can still be set up by hand with nmcli after first boot.
+import_wifi() {
+    local iwd_dir="${1:-/var/lib/iwd}" nm_dir="${2:-/mnt/etc/NetworkManager/system-connections}"
+    local dev ssid="" profile key
+    for dev in /sys/class/net/*/wireless; do
+        [[ -e "$dev" ]] || continue
+        dev="$(basename "$(dirname "$dev")")"
+        ssid="$(iw dev "$dev" link 2>/dev/null | sed -n 's/^[[:space:]]*SSID: //p')" || true
+        [[ -n "$ssid" ]] && break
+    done
+    [[ -n "$ssid" ]] || { log "No active Wi-Fi connection to import"; return 0; }
+
+    # iwd only names profiles with the plain SSID when it is alphanumeric/-/_/space.
+    profile="$iwd_dir/$ssid.psk"
+    if [[ ! "$ssid" =~ ^[A-Za-z0-9_\ -]+$ || ! -f "$profile" ]]; then
+        log "WARNING: can't import Wi-Fi network '$ssid' (needs a WPA-PSK iwd profile and a simple SSID); use nmcli after first boot"
+        return 0
+    fi
+    key="$(sed -n 's/^Passphrase=//p' "$profile")"
+    [[ -n "$key" ]] || key="$(sed -n 's/^PreSharedKey=//p' "$profile")"
+    [[ -n "$key" ]] || { log "WARNING: no key in iwd profile for '$ssid'; use nmcli after first boot"; return 0; }
+    key="${key//\\/\\\\}"   # backslashes are escapes in NetworkManager keyfiles
+
+    install -d -m 700 "$nm_dir"
+    (
+        umask 077
+        printf '[connection]\nid=%s\ntype=wifi\nautoconnect=true\n\n[wifi]\nmode=infrastructure\nssid=%s\n\n[wifi-security]\nkey-mgmt=wpa-psk\npsk=%s\n\n[ipv4]\nmethod=auto\n\n[ipv6]\nmethod=auto\n' \
+            "$ssid" "$ssid" "$key" > "$nm_dir/wifi-import.nmconnection"
+    )
+    log "Imported Wi-Fi network '$ssid'"
+}
+[[ "$IMPORT_WIFI" == "no" ]] || import_wifi
 
 log "Pre-install complete. Do NOT reboot yet: run post_install.sh in the chroot first."

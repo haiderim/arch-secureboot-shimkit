@@ -121,6 +121,7 @@ export USER_PASS='MyUserPass1'
 export TIMEZONE=Asia/Kolkata
 export LOCALE=en_US.UTF-8
 export MIRROR_COUNTRIES=India,Singapore,Germany,Netherlands
+export IMPORT_WIFI=yes
 
 # Run the script
 bash ./pre_install.sh
@@ -133,7 +134,9 @@ bash ./pre_install.sh
 - Timezone defaults to `Asia/Kolkata`, locale to `en_US.UTF-8`, and mirror countries to `India,Singapore,Germany,Netherlands`. Override any of these by exporting `TIMEZONE`, `LOCALE`, or `MIRROR_COUNTRIES` before running `pre_install.sh` — no script edits needed. `TIMEZONE` must match a path under `/usr/share/zoneinfo` (e.g. `America/New_York`), `LOCALE` must exist in `/usr/share/i18n/SUPPORTED` (e.g. `en_GB.UTF-8`), and `MIRROR_COUNTRIES` is a comma-separated Reflector country list (e.g. `United States,Canada`); the script validates all three up front and fails fast on typos.
 - CPU vendor is auto-detected: `pre_install.sh` installs `intel-ucode` or `amd-ucode` based on `/proc/cpuinfo`, and mkinitcpio's `microcode` hook embeds it in the UKI. No manual steps needed on AMD hardware.
 - Clock stays correct after install: `pre_install.sh` sets the hardware clock once (`hwclock --systohc`) and enables `systemd-timesyncd` for continuous NTP sync going forward.
-- Networking works automatically post-install: `pre_install.sh` installs and enables `NetworkManager` (Wi-Fi via `wpa_supplicant`, started on demand — no separate unit to enable) which also manages DNS through `/etc/resolv.conf`. Wired interfaces get DHCP with no extra config; for Wi-Fi use `nmcli device wifi connect <SSID> --ask` or `nmtui` after first boot. `systemd-networkd`/`iwd` are intentionally not used, to avoid two managers fighting over the same interfaces.
+- Networking works automatically post-install: `pre_install.sh` installs and enables `NetworkManager` (Wi-Fi via `wpa_supplicant`, started on demand — no separate unit to enable) which also manages DNS through `/etc/resolv.conf`. Wired interfaces get DHCP with no extra config; for Wi-Fi, the network the ISO is connected to is copied over (see below), or use `nmcli device wifi connect <SSID> --ask` or `nmtui` after first boot. `systemd-networkd`/`iwd` are intentionally not used, to avoid two managers fighting over the same interfaces.
+- Wi-Fi import: if the ISO is on a WPA-PSK network through `iwd`, `pre_install.sh` saves it for NetworkManager so the machine rejoins after first boot. This stores the Wi-Fi password in a root-only file on the encrypted disk. Set `IMPORT_WIFI=no` to skip it.
+- SSH is on after install: `openssh` is installed and `sshd` enabled, so log in with `ssh <NEWUSER>@<ip>`. Root password login stays off, but your user password is accepted from the network, so consider switching to SSH keys. The installed system gets its own IP, which can differ from the ISO's.
 - Missed setting `TIMEZONE`/`LOCALE`/`MIRROR_COUNTRIES` before running? Change them after entering the chroot (see the next section) and before running `post_install.sh`:
   - `ln -sf /usr/share/zoneinfo/<Region>/<City> /etc/localtime`
   - Open `/etc/locale.gen` with `nano`, uncomment your locale, then run `locale-gen`
@@ -406,7 +409,7 @@ Expected:
 * **`post_install.sh` validation fails** → Fix each item marked `✗` in its output and re-run it before rebooting.
 * **Security Violation at boot after setup** → Enroll the MOK (see First Boot). If it is already enrolled, boot another entry or use Advanced Recovery, then run `secureboot-sign-kernels.sh`.
 * **`error: command failed to execute correctly` from pacman** → A signing hook failed. Run `secureboot-sign-kernels.sh` and fix what it reports before rebooting.
-* **Network not working post-install** → Check `systemctl status NetworkManager` — it should be enabled and active (DHCP on wired is automatic once it's up). For Wi-Fi, connect with `nmcli device wifi connect "<SSID>" --ask` or `nmtui`; there's no automatic Wi-Fi join.
+* **Network not working post-install** → Check `systemctl status NetworkManager` — it should be enabled and active (DHCP on wired is automatic once it's up). For Wi-Fi, only the network imported from the ISO joins automatically; connect to others with `nmcli device wifi connect "<SSID>" --ask` or `nmtui`.
 * **Mirror download speeds slow** → Run `sudo reflector --country US,DE,JP --latest 20 --protocol https --sort rate --save /etc/pacman.d/mirrorlist`.
 
 ---
@@ -487,7 +490,7 @@ A: Yes. `pre_install.sh` partitions `$DISK` with `parted`, then reads back the r
 A: Yes, no manual steps needed. `pre_install.sh` detects the CPU vendor from `/proc/cpuinfo` and installs `amd-ucode` or `intel-ucode` accordingly, and mkinitcpio embeds it in the UKI.
 
 **Q: Does networking work right after install?**
-A: Wired ethernet does — `pre_install.sh` installs and enables `NetworkManager`, which brings up DHCP on Ethernet automatically. Wi-Fi does not auto-join — connect with `nmcli device wifi connect "<SSID>" --ask` or `nmtui` after first boot; `wpa_supplicant` is already installed as NetworkManager's backend.
+A: Wired ethernet does — `pre_install.sh` installs and enables `NetworkManager`, which brings up DHCP on Ethernet automatically. Wi-Fi rejoins automatically if the ISO was on a WPA-PSK network through `iwd` (see `IMPORT_WIFI`); otherwise connect with `nmcli device wifi connect "<SSID>" --ask` or `nmtui` after first boot; `wpa_supplicant` is already installed as NetworkManager's backend.
 
 **Q: What if I forget my LUKS password?**
 A: Data is irrecoverable without the password. This is intentional full-disk encryption.
