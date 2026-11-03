@@ -11,6 +11,9 @@ log(){ log_info "$*"; }
 USER_NAME="${USER_NAME:-$(awk -F: '$3>=1000 && $1!="nobody"{print $1; exit}' /etc/passwd)}"
 MOK_DIR="${MOK_DIR:-/root/secureboot}"
 ESP_MOUNT="${ESP_MOUNT:-/boot}"
+# AUR commit of shim-signed to build. Pinned so a later change to the package
+# can't run unreviewed; set to "master" (or a newer commit) to update shim.
+SHIM_SIGNED_REF="${SHIM_SIGNED_REF:-2fb92b90a7b89c6f9807b4a1e92dedeec3803dcf}"
 
 # Trap errors so we can report context before exiting
 handle_error() {
@@ -33,6 +36,9 @@ validate_parameters() {
     [[ -n "$MOK_DIR"   ]] || { log_error "MOK_DIR parameter is required"; exit 1; }
     [[ -n "$ESP_MOUNT" ]] || { log_error "ESP_MOUNT parameter is required"; exit 1; }
     [[ -d "$ESP_MOUNT" ]] || { log_error "ESP mount point $ESP_MOUNT does not exist"; exit 1; }
+    # mkinitcpio presets and the generated loader entries all assume /boot.
+    [[ "$ESP_MOUNT" == "/boot" ]] || { log_error "ESP_MOUNT must be /boot (got $ESP_MOUNT)"; exit 1; }
+    [[ "$SHIM_SIGNED_REF" =~ ^[A-Za-z0-9._/-]+$ ]] || { log_error "Invalid SHIM_SIGNED_REF: $SHIM_SIGNED_REF"; exit 1; }
     id "$USER_NAME" >/dev/null 2>&1 || { log_error "User $USER_NAME does not exist"; exit 1; }
     log_info "All parameters validated successfully"
 }
@@ -86,15 +92,17 @@ install -d -m 755 "$ESP_MOUNT/EFI/arch/keys"
 install -m 644 "$MOK_DIR/MOK.cer" "$ESP_MOUNT/EFI/arch/keys/MOK.cer"
 
 # --- Build and install shim-signed from the AUR when needed ---
-# Always fetch the current package: re-running this script is how a stale shim
-# (revoked, or lacking the Microsoft UEFI CA 2023 signature) gets replaced.
-su - "$USER_NAME" -c '
+# Re-running with a newer SHIM_SIGNED_REF is how a stale shim (revoked, or
+# lacking the Microsoft UEFI CA 2023 signature) gets replaced.
+log_info "Building shim-signed at AUR ref $SHIM_SIGNED_REF"
+su - "$USER_NAME" -c "
   set -e
   rm -rf ~/shim-signed
   git clone https://aur.archlinux.org/shim-signed.git ~/shim-signed
   cd ~/shim-signed
+  git checkout -q '$SHIM_SIGNED_REF'
   makepkg -f --noconfirm
-'
+"
 pacman -U --noconfirm --needed "/home/$USER_NAME/shim-signed/"*.pkg.tar.*
 
 SHIM_SRC="/usr/share/shim-signed"
@@ -114,16 +122,21 @@ if [[ -f "$ESP_MOUNT/EFI/systemd/systemd-bootx64.efi" ]]; then
   install -m 644 "$ESP_MOUNT/EFI/arch/grubx64.efi" "$ESP_MOUNT/EFI/BOOT/grubx64.efi"
 fi
 
-# --- Sign each kernel currently staged on the ESP ---
+# --- Sign each unified kernel image on the ESP ---
 sign_in_place() {
   local f="$1"
   [[ -f "$f" ]] || return 0
+  # Signing again would add another signature, not replace the existing one.
+  if sbverify --cert "$MOK_DIR/MOK.crt" "$f" >/dev/null 2>&1; then
+    log "Already signed: $f"
+    return 0
+  fi
   log "Signing $f"
   local tmp="${f}.signed"
   sbsign --key "$MOK_DIR/MOK.key" --cert "$MOK_DIR/MOK.crt" --output "$tmp" "$f"
   mv -f "$tmp" "$f"
 }
-for k in "$ESP_MOUNT"/vmlinuz-*; do
+for k in "$ESP_MOUNT"/EFI/Linux/*.efi; do
   [[ -f "$k" ]] && sign_in_place "$k"
 done
 
@@ -150,6 +163,14 @@ if [[ -f "$(dirname "$0")/96-secureboot-sync-loader.hook" ]]; then
   log_info "Pacman hook installed: 96-secureboot-sync-loader.hook"
 else
   log_error "Required hook file 96-secureboot-sync-loader.hook not found in script directory"
+  exit 1
+fi
+
+if [[ -f "$(dirname "$0")/secureboot-mkinitcpio-post" ]]; then
+  install -D -m 755 "$(dirname "$0")/secureboot-mkinitcpio-post" /etc/initcpio/post/secureboot-sign
+  log_info "mkinitcpio post hook installed: secureboot-sign"
+else
+  log_error "Required post hook secureboot-mkinitcpio-post not found in script directory"
   exit 1
 fi
 
@@ -199,7 +220,7 @@ for BOOTNUM in $(efibootmgr | awk '/Arch \(SecureBoot\)/{print substr($1,5,4)}')
 done
 efibootmgr -c -d "$ESP_DISK" -p "$ESP_PARTNUM" \
   -L "Arch (SecureBoot)" \
-  -l '\EFI\arch\shimx64.efi' || true
+  -l '\EFI\arch\shimx64.efi' || log_warn "Could not create the NVRAM boot entry; firmware must boot \\EFI\\BOOT\\BOOTX64.EFI instead"
 
 # --- Configure zram-based swap ---
 log_info "Setting up ZRAM"
@@ -247,17 +268,40 @@ else
   systemctl enable --now snapperd.service || true
 fi
 
-# --- Summarize Secure Boot artifacts for sanity checking ---
+# --- Fail unless the Secure Boot chain is really in place ---
 validate_secureboot() {
-    local checks=0
-    [[ -f "$MOK_DIR/MOK.key" && -f "$MOK_DIR/MOK.crt" ]] && { log_info "✓ MOK keys present"; ((checks++)) || true; }
-    [[ -f "$ESP_MOUNT/EFI/arch/shimx64.efi" ]] && { log_info "✓ Shim installed"; ((checks++)) || true; }
-    [[ -f "$ESP_MOUNT/EFI/arch/grubx64.efi" ]] && { log_info "✓ systemd-boot signed"; ((checks++)) || true; }
-    [[ -f "/etc/pacman.d/hooks/95-secureboot-sign.hook" && -f "/etc/pacman.d/hooks/96-secureboot-sync-loader.hook" ]] && { log_info "✓ Pacman hooks installed"; ((checks++)) || true; }
-    efibootmgr | grep -q "Arch (SecureBoot)" && { log_info "✓ Boot entry exists"; ((checks++)) || true; }
-    echo $checks
+    local failures=0 f
+    check() {
+        if "${@:2}" >/dev/null 2>&1; then
+            log_info "✓ $1"
+        else
+            log_error "✗ $1"
+            failures=$((failures + 1))
+        fi
+    }
+    check "MOK key present" test -s "$MOK_DIR/MOK.key"
+    check "MOK certificate present" test -s "$MOK_DIR/MOK.crt"
+    check "Shim installed" test -s "$ESP_MOUNT/EFI/arch/shimx64.efi"
+    check "Fallback shim installed" test -s "$ESP_MOUNT/EFI/BOOT/BOOTX64.EFI"
+    check "MokManager installed" test -s "$ESP_MOUNT/EFI/arch/mmx64.efi"
+    check "MOK.cer available for enrollment" test -s "$ESP_MOUNT/EFI/arch/keys/MOK.cer"
+    check "systemd-boot signed" sbverify --cert "$MOK_DIR/MOK.crt" "$ESP_MOUNT/EFI/arch/grubx64.efi"
+    check "Kernel hook installed" test -f /etc/pacman.d/hooks/95-secureboot-sign.hook
+    check "Loader hook installed" test -f /etc/pacman.d/hooks/96-secureboot-sync-loader.hook
+    check "mkinitcpio post hook installed" test -x /etc/initcpio/post/secureboot-sign
+    check "Unified kernel image present" test -f "$ESP_MOUNT/EFI/Linux/arch-linux.efi"
+    for f in "$ESP_MOUNT"/EFI/Linux/*.efi; do
+        check "Signed: $f" sbverify --cert "$MOK_DIR/MOK.crt" "$f"
+    done
+    # Not fatal: the firmware can still boot the fallback shim without this entry.
+    if ! efibootmgr | grep -q "Arch (SecureBoot)"; then
+        log_warn "No NVRAM boot entry; relying on \\EFI\\BOOT\\BOOTX64.EFI"
+    fi
+    if [[ $failures -ne 0 ]]; then
+        log_error "Secure Boot validation failed ($failures problem(s)). Do NOT reboot until these are fixed."
+        exit 1
+    fi
 }
-secureboot_score=$(validate_secureboot)
-log_info "Secure Boot validation score: $secureboot_score/5"
+validate_secureboot
 
 log_info "Post-install complete. Reboot, enroll MOK, and enable services if needed."

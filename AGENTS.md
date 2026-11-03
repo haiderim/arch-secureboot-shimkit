@@ -21,11 +21,10 @@ hooks that keep signatures current across updates.
   the `PARTN` column (actual GPT partition number) — not a string-concatenated suffix, and not
   `lsblk`'s emission order either, which is NOT guaranteed to match partition number (seen reversed
   on a disk that previously held a different partition table — silently swapped `EFI_PART`/
-  `CRYPT_PART` and broke the install). The initrd microcode line references whichever ucode image
-  `mkinitcpio` actually staged on the ESP, not a hardcoded `intel-ucode`. Don't reintroduce guessing,
-  or trust unsorted list order, in either place.
+  `CRYPT_PART` and broke the install). Don't reintroduce guessing,
+  or trust unsorted list order.
 - **Network stack is NetworkManager + wpa_supplicant.** Enabled in `pre_install.sh`'s chroot phase
-  (`systemctl enable NetworkManager systemd-resolved`); `wpa_supplicant` is dbus-activated by
+  (`systemctl enable NetworkManager`, which also writes `/etc/resolv.conf`); `wpa_supplicant` is dbus-activated by
   NetworkManager on demand, never enabled as its own unit. Do not reintroduce `iwd` or
   `systemd-networkd` — two network managers on the same interfaces fight over DHCP/link state.
 - **Dropping a config file isn't enough — check whether the tool has a separate registry.**
@@ -34,6 +33,16 @@ hooks that keep signatures current across updates.
   pacman hooks only recognize configs listed in `/etc/conf.d/snapper`'s `SNAPPER_CONFIGS` — without
   that line, snapshots silently never happen despite every other artifact looking correctly set up.
   Register it there too, before `snapperd` first starts.
+- **Boot through signed UKIs only.** Kernel, initramfs, microcode and cmdline all live inside
+  `/boot/EFI/Linux/arch-*.efi`. Don't reintroduce loader entries or separate initrds: Secure Boot
+  doesn't authenticate them. UKIs are rebuilt by more than kernel updates (firmware, `systemd`,
+  manual `mkinitcpio -P`), so signing lives in the mkinitcpio post hook, not only a pacman hook.
+- **`sbverify --list` exits 0 on unsigned files.** Check signatures with `sbverify --cert`. Re-running
+  `sbsign` adds a signature rather than replacing one, so skip files that already verify.
+- **Pacman hooks get a clean environment, and pacman exits 0 when a hook fails.** Persist settings in
+  `/etc/secureboot-shimkit.conf`, exit non-zero on failure, and don't assume callers will notice.
+- **An automounted ESP gives `findmnt` two sources** (`systemd-1` and the device). Filter with
+  `-t vfat`. Commented-out lines can also match unanchored `grep`s when editing `fstab`.
 - Both scripts are `set -euo pipefail`. Guard intentional non-fatal failures with `|| true`
   explicitly; don't let one slip in by accident.
 

@@ -138,11 +138,11 @@ mount "$EFI_PART" /mnt/boot
 
 # --- Install base packages and seed configuration ---
 log "Optimizing mirrors with reflector"
-reflector --country "$MIRROR_COUNTRIES" --latest 10 --protocol http --sort rate --save /etc/pacman.d/mirrorlist || pacman -Syy --noconfirm
+reflector --country "$MIRROR_COUNTRIES" --latest 10 --protocol https --sort rate --save /etc/pacman.d/mirrorlist || pacman -Syy --noconfirm
 
 log "Installing base system"
 # Detect CPU vendor to install the matching microcode package; the
-# mkinitcpio "microcode" hook auto-detects whichever package is present.
+# mkinitcpio "microcode" hook embeds whichever package is present in the UKI.
 UCODE_PKG="intel-ucode"
 case "$(awk -F: '/vendor_id/{print $2; exit}' /proc/cpuinfo | tr -d ' ')" in
   AuthenticAMD) UCODE_PKG="amd-ucode" ;;
@@ -150,12 +150,14 @@ case "$(awk -F: '/vendor_id/{print $2; exit}' /proc/cpuinfo | tr -d ' ')" in
   *) log "WARNING: unrecognized CPU vendor_id, defaulting to intel-ucode" ;;
 esac
 log "Detected microcode package: $UCODE_PKG"
-packages=(base linux linux-lts linux-firmware btrfs-progs cryptsetup efibootmgr "$UCODE_PKG" snapper snap-pac sbsigntools zram-generator reflector vi less git openssl networkmanager wpa_supplicant nano sudo)
+packages=(base linux linux-lts linux-firmware btrfs-progs cryptsetup efibootmgr "$UCODE_PKG" snapper snap-pac sbsigntools systemd-ukify zram-generator reflector vi less git openssl networkmanager wpa_supplicant nano sudo)
 pacman -Sy --noconfirm
 pacstrap /mnt "${packages[@]}"
 
 log "Generating fstab"
 genfstab -U /mnt >> /mnt/etc/fstab
+# Mount subvolumes by name only: a restored snapshot has a different subvolid.
+sed -i -E 's/,?subvolid=[0-9]+//' /mnt/etc/fstab
 
 # --- Configure the new system from within the chroot ---
 log "Entering chroot to configure system"
@@ -192,72 +194,42 @@ locale-gen
 echo "LANG=${LOCALE}" > /etc/locale.conf
 echo "$TARGET_HOSTNAME" > /etc/hostname
 
-# Configure initramfs hooks for encrypted Btrfs
+# Build unified kernel images: one signed file holding the kernel, initramfs,
+# microcode (via the microcode hook) and cmdline, so Secure Boot covers them all.
+# Separate initramfs files and loader-entry options would be unauthenticated.
+ROOT_UUID=$(blkid -s UUID -o value "$CRYPT_PART")
+mkdir -p /etc/kernel /boot/EFI/Linux
+echo "cryptdevice=UUID=$ROOT_UUID:cryptroot root=/dev/mapper/cryptroot rootflags=subvol=@ rw zswap.enabled=0" > /etc/kernel/cmdline
+
 perl -0777 -pe 's/^HOOKS=.*$/HOOKS=(base udev autodetect microcode modconf kms keyboard keymap block encrypt filesystems btrfs fsck)/m' -i /etc/mkinitcpio.conf
+for kern in linux linux-lts; do
+  preset="/etc/mkinitcpio.d/$kern.preset"
+  [[ -f "$preset" ]] || { log "ERROR: missing $preset"; exit 1; }
+  sed -i -e 's|^default_image=|#default_image=|' \
+         -e "s|^#default_uki=.*|default_uki=\"/boot/EFI/Linux/arch-$kern.efi\"|" "$preset"
+  rm -f /boot/initramfs-"$kern".img /boot/initramfs-"$kern"-fallback.img
+done
 mkinitcpio -P
 
-# Install systemd-boot and write loader entries
+# systemd-boot finds UKIs in EFI/Linux by itself, so no loader entries are needed.
 bootctl install
-ROOT_UUID=$(blkid -s UUID -o value "$CRYPT_PART")
-
-# Use whichever microcode image mkinitcpio actually staged on the ESP,
-# rather than re-deriving CPU vendor. Self-corrects for any vendor string
-# and omits the line cleanly if no microcode package applies.
-UCODE_INITRD=""
-[[ -f /boot/intel-ucode.img ]] && UCODE_INITRD="initrd  /intel-ucode.img"
-[[ -f /boot/amd-ucode.img ]] && UCODE_INITRD="initrd  /amd-ucode.img"
-
 cat > /boot/loader/loader.conf <<EOF2
-default arch.conf
+default arch-linux.efi
 timeout 3
 editor no
 EOF2
-
-cat > /boot/loader/entries/arch.conf <<EOF2
-title   Arch Linux
-linux   /vmlinuz-linux
-$UCODE_INITRD
-initrd  /initramfs-linux.img
-options cryptdevice=UUID=$ROOT_UUID:cryptroot root=/dev/mapper/cryptroot rootflags=subvol=@ rw
-EOF2
-
-# Current mkinitcpio presets build no fallback image by default; only offer a
-# menu entry when the image it references actually exists.
-if [[ -f /boot/initramfs-linux-fallback.img ]]; then
-  cat > /boot/loader/entries/arch-fallback.conf <<EOF2
-title   Arch Linux (Fallback)
-linux   /vmlinuz-linux
-$UCODE_INITRD
-initrd  /initramfs-linux-fallback.img
-options cryptdevice=UUID=$ROOT_UUID:cryptroot root=/dev/mapper/cryptroot rootflags=subvol=@ rw
-EOF2
-fi
-
-if [[ -f /boot/vmlinuz-linux-lts ]]; then
-  cat > /boot/loader/entries/arch-lts.conf <<EOF2
-title   Arch Linux (LTS)
-linux   /vmlinuz-linux-lts
-$UCODE_INITRD
-initrd  /initramfs-linux-lts.img
-options cryptdevice=UUID=$ROOT_UUID:cryptroot root=/dev/mapper/cryptroot rootflags=subvol=@ rw
-EOF2
-  if [[ -f /boot/initramfs-linux-lts-fallback.img ]]; then
-    cat > /boot/loader/entries/arch-lts-fallback.conf <<EOF2
-title   Arch Linux (LTS Fallback)
-linux   /vmlinuz-linux-lts
-$UCODE_INITRD
-initrd  /initramfs-linux-lts-fallback.img
-options cryptdevice=UUID=$ROOT_UUID:cryptroot root=/dev/mapper/cryptroot rootflags=subvol=@ rw
-EOF2
-  fi
-fi
 
 # --- Create administrative user and configure access ---
 log "Setting up user accounts..."
 log "Username: $NEWUSER"
 
 # Set the root account password
-echo "root:$ROOT_PASS" | chpasswd && log "Root password set successfully" || log "ERROR: Failed to set root password"
+if echo "root:$ROOT_PASS" | chpasswd; then
+    log "Root password set successfully"
+else
+    log "ERROR: Failed to set root password"
+    exit 1
+fi
 
 # Create the non-root admin user if it does not exist
 if ! id "$NEWUSER" &>/dev/null; then
@@ -276,6 +248,7 @@ else
             log "Added $NEWUSER to wheel group"
         else
             log "ERROR: Failed to add $NEWUSER to wheel group"
+            exit 1
         fi
     fi
 fi
@@ -302,12 +275,12 @@ cp /etc/sudoers /etc/sudoers.bak
 sed -i 's/^# %wheel ALL=(ALL:ALL) ALL/%wheel ALL=(ALL:ALL) ALL/' /etc/sudoers
 log "Sudo access configured for wheel group"
 
-# Enable essential network daemons. NetworkManager (backed by
-# wpa_supplicant for Wi-Fi, started automatically as needed — no separate
-# unit to enable) brings up DHCP on wired and wireless interfaces without
-# any extra config; systemd-networkd is intentionally left disabled to
-# avoid both managers fighting over the same interfaces.
-systemctl enable NetworkManager systemd-resolved || true
+# Enable NetworkManager (backed by wpa_supplicant for Wi-Fi, started
+# automatically as needed — no separate unit to enable). It brings up DHCP
+# and writes /etc/resolv.conf itself, so systemd-resolved isn't needed;
+# systemd-networkd is intentionally left disabled to avoid both managers
+# fighting over the same interfaces.
+systemctl enable NetworkManager
 
 # Seed reflector with preferred mirror configuration
 # reflector.service reads this exact path; the file is parsed with shlex, so
@@ -315,7 +288,7 @@ systemctl enable NetworkManager systemd-resolved || true
 cat > /etc/xdg/reflector/reflector.conf <<EOF2
 --save /etc/pacman.d/mirrorlist
 --country "${MIRROR_COUNTRIES}"
---protocol http
+--protocol https
 --latest 10
 --sort rate
 --age 12
@@ -332,17 +305,17 @@ sed -i 's/^#VerbosePkgLists/VerbosePkgLists/' /etc/pacman.conf
 # Run final validation checks before exiting
 log "Performing final validation checks..."
 checks=0
-[[ -f "/boot/EFI/systemd/systemd-bootx64.efi" ]] && ((checks++)) && log "✓ systemd-boot installed"
-[[ -f "/boot/vmlinuz-linux" ]] && ((checks++)) && log "✓ Linux kernel installed"
-id "$NEWUSER" &>/dev/null && ((checks++)) && log "✓ User $NEWUSER exists"
-groups "$NEWUSER" | grep -q wheel && ((checks++)) && log "✓ User in wheel group"
-systemctl is-enabled NetworkManager &>/dev/null && ((checks++)) && log "✓ Network services enabled"
+[[ -f "/boot/EFI/systemd/systemd-bootx64.efi" ]] && ((++checks)) && log "✓ systemd-boot installed"
+[[ -f "/boot/EFI/Linux/arch-linux.efi" ]] && ((++checks)) && log "✓ Unified kernel image built"
+id "$NEWUSER" &>/dev/null && ((++checks)) && log "✓ User $NEWUSER exists"
+groups "$NEWUSER" | grep -q wheel && ((++checks)) && log "✓ User in wheel group"
+systemctl is-enabled NetworkManager &>/dev/null && ((++checks)) && log "✓ Network services enabled"
 
 echo "[INFO] Validation score: $checks/5"
-if [[ $checks -ge 4 ]]; then
+if [[ $checks -eq 5 ]]; then
     echo "[SUCCESS] Pre-installation completed successfully!"
 else
-    echo "[WARNING] Some components may need manual verification"
+    echo "[ERROR] Pre-installation validation failed; see the checks above" >&2
     exit 1
 fi
 CHROOT_EOF

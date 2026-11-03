@@ -62,7 +62,7 @@
                ▼
  ┌────────────────────────────┐
  │   Arch boots via shim →    │
- │ systemd-boot → signed kernel│
+ │ systemd-boot → signed UKI   │
  └─────────────┬──────────────┘
                │
                ▼
@@ -106,24 +106,7 @@ timedatectl set-ntp true
 ping -c1 archlinux.org
 ```
 
-Partition preview (works for SATA, NVMe, or MMC — this is just to sanity-check the target before running the script):
-
-> **Heads-up:** The commands below wipe whatever lives on `$DISK`. Run `lsblk -f` (or `fdisk -l`) first, confirm the drive letter, and replace `/dev/sda` with your actual device (e.g. `/dev/nvme0n1`, `/dev/mmcblk0`).
->
-> **Note:** `pre_install.sh` partitions `$DISK` with `parted`, then derives the resulting `EFI_PART`/`CRYPT_PART` device paths from `lsblk` output rather than guessing a suffix. This works unmodified for SATA (`/dev/sda1`), NVMe (`/dev/nvme0n1p1`), and MMC (`/dev/mmcblk0p1`) naming.
-
-```bash
-# WARNING: This will erase all data on the disk!
-DISK=/dev/sda
-# Verify the disk is correct
-lsblk "$DISK"
-sgdisk --zap-all "$DISK"
-sgdisk -n 1:0:+512MiB -t 1:ef00 -c 1:"EFI System" "$DISK"
-sgdisk -n 2:0:0       -t 2:8300 -c 2:"Linux LUKS" "$DISK"
-partprobe "$DISK"
-# Verify partitions were created
-lsblk "$DISK"
-```
+> **Heads-up:** `pre_install.sh` erases everything on `$DISK`. Run `lsblk -f` (or `fdisk -l`) first and confirm the device. Don't partition it yourself: the script creates the GPT layout (1 GiB ESP, the rest LUKS), then derives `EFI_PART`/`CRYPT_PART` from `lsblk`, so SATA (`/dev/sda`), NVMe (`/dev/nvme0n1`), and MMC (`/dev/mmcblk0`) all work unmodified.
 
 Run installation:
 
@@ -147,9 +130,9 @@ bash ./pre_install.sh
 
 - `pre_install.sh` enforces strong passwords: at least 8 characters, with upper and lower case letters and a number, and the root and user passwords must differ. Let the script prompt interactively if your values fail validation.
 - Timezone defaults to `Asia/Kolkata`, locale to `en_US.UTF-8`, and mirror countries to `India,Singapore,Germany,Netherlands`. Override any of these by exporting `TIMEZONE`, `LOCALE`, or `MIRROR_COUNTRIES` before running `pre_install.sh` — no script edits needed. `TIMEZONE` must match a path under `/usr/share/zoneinfo` (e.g. `America/New_York`), `LOCALE` must exist in `/usr/share/i18n/SUPPORTED` (e.g. `en_GB.UTF-8`), and `MIRROR_COUNTRIES` is a comma-separated Reflector country list (e.g. `United States,Canada`); the script validates all three up front and fails fast on typos.
-- CPU vendor is auto-detected: `pre_install.sh` installs `intel-ucode` or `amd-ucode` based on `/proc/cpuinfo`, and the generated loader entries reference whichever microcode image `mkinitcpio` actually staged on the ESP. No manual steps needed on AMD hardware.
+- CPU vendor is auto-detected: `pre_install.sh` installs `intel-ucode` or `amd-ucode` based on `/proc/cpuinfo`, and mkinitcpio's `microcode` hook embeds it in the UKI. No manual steps needed on AMD hardware.
 - Clock stays correct after install: `pre_install.sh` sets the hardware clock once (`hwclock --systohc`) and enables `systemd-timesyncd` for continuous NTP sync going forward.
-- Networking works automatically post-install: `pre_install.sh` installs and enables `NetworkManager` (Wi-Fi via `wpa_supplicant`, started on demand — no separate unit to enable) plus `systemd-resolved` for DNS. Wired interfaces get DHCP with no extra config; for Wi-Fi use `nmcli device wifi connect <SSID> --ask` or `nmtui` after first boot. `systemd-networkd`/`iwd` are intentionally not used, to avoid two managers fighting over the same interfaces.
+- Networking works automatically post-install: `pre_install.sh` installs and enables `NetworkManager` (Wi-Fi via `wpa_supplicant`, started on demand — no separate unit to enable) which also manages DNS through `/etc/resolv.conf`. Wired interfaces get DHCP with no extra config; for Wi-Fi use `nmcli device wifi connect <SSID> --ask` or `nmtui` after first boot. `systemd-networkd`/`iwd` are intentionally not used, to avoid two managers fighting over the same interfaces.
 - Missed setting `TIMEZONE`/`LOCALE`/`MIRROR_COUNTRIES` before running? Change them after entering the chroot (see the next section) and before running `post_install.sh`:
   - `ln -sf /usr/share/zoneinfo/<Region>/<City> /etc/localtime`
   - Open `/etc/locale.gen` with `nano`, uncomment your locale, then run `locale-gen`
@@ -192,21 +175,22 @@ Make sure you have everything below sorted before you touch the scripts:
 Clone the repo so `post_install.sh` can install the required hook and helper files from the same directory:
 
 ```bash
-git clone https://github.com/haiderim/arch_setup.git
-cd arch_setup
-chmod +x pre_install.sh post_install.sh efi_cleanup.sh secureboot-sign-kernels.sh secureboot-sync-loader.sh
+git clone https://github.com/haiderim/arch-secureboot-shimkit.git
+cd arch-secureboot-shimkit
+chmod +x pre_install.sh post_install.sh efi_cleanup.sh secureboot-sign-kernels.sh secureboot-sync-loader.sh secureboot-restore-hooks.sh
 ```
 
 Why clone instead of downloading only `pre_install.sh` and `post_install.sh`:
 
 * `post_install.sh` installs companion assets from the repo directory
-* The Secure Boot maintenance path now depends on six extra files:
+* The Secure Boot maintenance path now depends on seven extra files:
 * `95-secureboot-sign.hook`
 * `96-secureboot-sync-loader.hook`
 * `secureboot-sign-kernels.sh`
 * `secureboot-sync-loader.sh`
 * `secureboot-restore-hooks.sh`
 * `secureboot-post-rollback.service`
+* `secureboot-mkinitcpio-post`
 
 If those files are missing, `post_install.sh` will now stop with an error instead of continuing with an incomplete Secure Boot setup.
 
@@ -229,9 +213,9 @@ bash ./pre_install.sh
 `pre_install.sh` leaves your target system mounted at `/mnt`. Copy the scripts into the installed system so they're available once you chroot, then change root and finish the secure-boot setup:
 
 ```bash
-cp -r arch_setup /mnt/root/
+cp -r ../arch-secureboot-shimkit /mnt/root/
 arch-chroot /mnt
-cd /root/arch_setup
+cd /root/arch-secureboot-shimkit
 USER_NAME=myuser ./post_install.sh
 exit
 umount -R /mnt
@@ -246,9 +230,9 @@ Inside the chroot, take a moment to run `lsblk` or inspect `/etc` before startin
 * MOK keys created at `/root/secureboot/`
 * `shim-signed` built (AUR) and installed
 * `shimx64.efi`, `MokManager.efi`, and signed `systemd-bootx64.efi` staged in `\EFI\arch`
-* Kernels signed (`/boot/vmlinuz-*`)
+* Unified kernel images built in `/boot/EFI/Linux/` and signed, covering the kernel, initramfs, microcode and cmdline
 * **Automatic kernel signing and systemd-boot sync hooks installed** for future pacman updates
-* **Hook recovery service installed** (`secureboot-post-rollback.service`) to restore missing hooks and re-sign kernels automatically on every boot
+* **Boot-time safety net installed** (`secureboot-post-rollback.service`) to restore missing hooks and sign any unsigned UKI on every boot
 * Boot entry created: **Arch (SecureBoot)**
 * ZRAM configured (50% of RAM, zstd compression)
 * Snapper configured for Btrfs snapshots (timeline disabled, 5 snapshots max)
@@ -259,42 +243,43 @@ Inside the chroot, take a moment to run `lsblk` or inspect `/etc` before startin
 
 The setup installs a pacman hook system for both kernels and the shim-loaded `systemd-boot` binary:
 
-* `95-secureboot-sign.hook` + `secureboot-sign-kernels.sh` sign new kernels after kernel package updates
+* `/etc/initcpio/post/secureboot-sign` signs each UKI whenever mkinitcpio builds one, including rebuilds caused by firmware or `systemd` updates
+* `95-secureboot-sign.hook` + `secureboot-sign-kernels.sh` check and sign UKIs after kernel package updates
 * `96-secureboot-sync-loader.hook` + `secureboot-sync-loader.sh` refresh and re-sign `systemd-boot`, and copy shim and MokManager to the ESP, after `systemd` or `shim-signed` package updates
 
-`shim-signed` comes from the AUR, so `pacman -Syu` won't upgrade it. Update it with an AUR helper, or re-run `post_install.sh`, which always fetches the current package.
+`shim-signed` comes from the AUR, so `pacman -Syu` won't upgrade it. `post_install.sh` builds a pinned AUR commit; to update shim, review the newer package and re-run with `SHIM_SIGNED_REF=<commit> ./post_install.sh`, or use an AUR helper.
 
-If signing fails, the hook exits non-zero and pacman prints an error for it. Fix this before rebooting: an unsigned kernel will not boot under Secure Boot.
+If signing fails, pacman prints `error: command failed to execute correctly` but still exits 0, so don't chain `pacman -Syu && reboot`. Fix the error before rebooting: an unsigned kernel will not boot under Secure Boot.
 
 This means:
 
 * No manual intervention required after kernel updates
 * No manual intervention required after `systemd` updates
-* Kernels are signed immediately after installation/upgrade
+* UKIs are signed immediately after every rebuild
 * The shim-loaded `\EFI\arch\grubx64.efi` stays in sync with the current `systemd-boot`
 * System remains bootable with Secure Boot enabled after `pacman -Syu`
 * Signing scripts include verification and error handling
 * Comprehensive logging for troubleshooting
 
-The kernel hook triggers on kernel package upgrades, and the loader hook triggers on `systemd` upgrades. Together they keep both the kernel and the shim-loaded bootloader signed across normal system updates.
+The kernel hook triggers whenever any package installs a kernel image, and the loader hook triggers on `systemd` upgrades. Together they keep both the kernel and the shim-loaded bootloader signed across normal system updates.
 
-#### Hook Recovery Service
+#### Boot-Time Safety Net
 
-The pacman hooks live in `/etc/pacman.d/hooks/` on the root btrfs subvolume (`@`). They can disappear silently in two ways:
+`secureboot-post-rollback.service` runs `secureboot-restore-hooks.sh` on every boot. It restores any missing signing hook and signs any UKI that isn't signed by your MOK, such as a spare kernel left unsigned by a failed update.
 
-* **btrfs rollback** — `snap-pac` snapshots `@` before every pacman transaction. Rolling back `@` wipes the hooks, but `/var/log` (on the separate `@var_log` subvolume) is untouched, so the pacman log still shows them running. The next kernel upgrade proceeds unsigned.
-* **accidental deletion** — manual cleanup or tooling that clears `/etc/pacman.d/hooks/`.
+Its limits:
 
-`post_install.sh` installs a oneshot systemd service to recover automatically:
-
-* `secureboot-post-rollback.service` runs on every boot after `local-fs.target`
-* `secureboot-restore-hooks.sh` checks whether the hooks and sbin scripts are present; if any are missing it recreates them from embedded content (no dependency on the source repo)
-* It also checks whether any kernel on the ESP is unsigned and re-signs if needed
+* It only runs after a successful boot, so it can't rescue a system whose default UKI won't boot. Use another menu entry, or [Advanced Recovery](#advanced-recovery).
+* The service and its scripts live on `@` with the hooks, so a rollback to before `post_install.sh` removes them too.
+* It doesn't restore the sbin scripts. If those are missing, re-run `post_install.sh`.
 
 ```bash
-# Check recovery service status
 systemctl status secureboot-post-rollback.service
 ```
+
+#### Rolling Back a Snapshot
+
+Snapshots only cover the Btrfs subvolumes. UKIs live on the ESP, so after rolling back `@` the UKI may be newer than the modules on root. Boot, then run `pacman -S linux linux-lts` to rebuild and re-sign matching images. The cmdline is fixed to `rootflags=subvol=@`, so restore a snapshot by replacing `@` from the ISO; `snapper rollback` changes the default subvolume, which this cmdline ignores.
 
 ---
 
@@ -306,7 +291,7 @@ At first boot, MokManager will launch:
 2. Navigate to `\EFI\arch\keys\MOK.cer`
 3. Enroll → reboot
 
-Now shim trusts your MOK, and systemd-boot will load signed kernels and a signed bootloader binary.
+Now shim trusts your MOK, and systemd-boot will load signed UKIs and a signed bootloader binary.
 
 ---
 
@@ -338,7 +323,7 @@ efibootmgr -b <num> -B   # remove duplicates
 `efi_cleanup.sh` helps tidy up duplicate EFI boot entries after testing or rerunning the Secure Boot setup. Run it from the installed system (root, with the ESP mounted at `/boot`):
 
 ```bash
-cd /root/arch_setup
+cd /root/arch-secureboot-shimkit
 ./efi_cleanup.sh
 ```
 
@@ -347,7 +332,7 @@ What it does:
 - Creates a timestamped backup of `/boot/EFI` before making changes.
 - Removes duplicate `Arch (SecureBoot)` and `Linux Boot Manager` entries.
 - Re-creates a single `Arch (SecureBoot)` entry pointing at `\EFI\arch\shimx64.efi`.
-- Attempts to set the boot order to prefer Arch while keeping Windows second if detected.
+- Sets the boot order to Arch first and Windows second if detected, keeping all other entries after them.
 
 Review the backup (`/root/esp-backup-*.tar.gz`) and restore manually if you want to undo the changes.
 
@@ -361,7 +346,7 @@ mokutil --sb-state           # Should show "enabled"
 efibootmgr -v | grep "Arch (SecureBoot)"  # Should show shimx64.efi
 
 # Kernel signatures
-sbverify --list /boot/vmlinuz-linux  # Should show signature info
+sbverify --cert /root/secureboot/MOK.crt /boot/EFI/Linux/arch-linux.efi  # Should print "Signature verification OK"
 
 # File permissions
 ls -ld /boot                 # Should be drwx------ (0700)
@@ -376,7 +361,7 @@ cat /etc/pacman.d/hooks/95-secureboot-sign.hook     # Verify kernel hook configu
 cat /etc/pacman.d/hooks/96-secureboot-sync-loader.hook  # Verify loader hook configuration
 
 # Test the signing system (optional)
-sudo /usr/local/sbin/secureboot-sign-kernels.sh      # Should report "0/0 kernels signed" or similar
+sudo /usr/local/sbin/secureboot-sign-kernels.sh      # Should report every kernel as signed and verified
 sudo /usr/local/sbin/secureboot-sync-loader.sh       # Should update/sign systemd-boot and exit successfully
 
 # ZRAM status
@@ -392,7 +377,7 @@ Expected:
 
 * Secure Boot **enabled** (mokutil shows enabled)
 * Boot entry points to **shimx64.efi** (not systemd-boot directly)
-* Kernels are **signed** (sbverify shows signature info)
+* UKIs are **signed** (sbverify prints "Signature verification OK")
 * **Automatic signing hooks** are installed and configured
 * **ZRAM** is active as swap device
 * **Snapper** is configured for Btrfs snapshots
@@ -442,17 +427,8 @@ mount /dev/sda1 /mnt/boot
 # For NVMe disks, use /dev/nvme0n1p1 instead of /dev/sda1
 # For other disk types, adjust partition numbers accordingly
 
-# 5. Bind system directories
-mount --rbind /dev  /mnt/dev
-mount --rbind /proc /mnt/proc
-mount --rbind /sys  /mnt/sys
-mount --rbind /run  /mnt/run
-
-# 6. Chroot into your system
+# 5. Chroot into your system (arch-chroot sets up /dev, /proc, /sys and /run)
 arch-chroot /mnt
-
-# 7. (Optional) Regenerate fstab if needed
-genfstab -U /mnt >> /mnt/etc/fstab
 ```
 
 You are now inside your installed Arch system. From here you can:
@@ -474,11 +450,11 @@ reboot
 
 ## FAQ
 
-**Q: Do I need UKI?**
-A: No — shim + MOK works on locked Secure Boot machines without firmware key enrollment.
+**Q: Why unified kernel images?**
+A: A separate initramfs and loader-entry options sit unsigned on the unencrypted ESP, so someone with physical access could alter them to capture your LUKS passphrase. A UKI puts them inside the signed file. The kernel cmdline lives in `/etc/kernel/cmdline`; run `mkinitcpio -P` after changing it. The ESP still holds the unsigned `/boot/vmlinuz-*` copies, but they are not used for booting.
 
-**Q: Do I need to sign initramfs/microcode?**
-A: No, only PE executables (EFI + kernels).
+**Q: Do I need to sign initramfs/microcode separately?**
+A: No. They are inside the UKI, and a mkinitcpio post hook signs it after every rebuild.
 
 **Q: Do I need to re-sign after updates?**
 A: No — pacman hooks handle it automatically. The setup installs two maintenance paths: `95-secureboot-sign.hook` with `secureboot-sign-kernels.sh` for kernel upgrades, and `96-secureboot-sync-loader.hook` with `secureboot-sync-loader.sh` for `systemd` upgrades. Together they keep both the kernels and the shim-loaded `systemd-boot` binary signed across `pacman -Syu`.
@@ -499,7 +475,7 @@ A: Use `sudo snapper create -d "Description"` or `sudo btrfs subvolume snapshot 
 A: Yes. `pre_install.sh` partitions `$DISK` with `parted`, then reads back the resulting partition device paths from `lsblk` instead of guessing a `sdX`/`nvmeXnYp` suffix. SATA, NVMe, and MMC all work with `DISK` set to the base device (e.g. `/dev/sda`, `/dev/nvme0n1`, `/dev/mmcblk0`) — no script edits required.
 
 **Q: Does this work on AMD CPUs?**
-A: Yes, no manual steps needed. `pre_install.sh` detects the CPU vendor from `/proc/cpuinfo` and installs `amd-ucode` or `intel-ucode` accordingly; the generated loader entries reference whichever microcode image `mkinitcpio` actually staged on the ESP, so the boot entries always point at a file that exists.
+A: Yes, no manual steps needed. `pre_install.sh` detects the CPU vendor from `/proc/cpuinfo` and installs `amd-ucode` or `intel-ucode` accordingly, and mkinitcpio embeds it in the UKI.
 
 **Q: Does networking work right after install?**
 A: Wired ethernet does — `pre_install.sh` installs and enables `NetworkManager`, which brings up DHCP on Ethernet automatically. Wi-Fi does not auto-join — connect with `nmcli device wifi connect "<SSID>" --ask` or `nmtui` after first boot; `wpa_supplicant` is already installed as NetworkManager's backend.
@@ -508,4 +484,7 @@ A: Wired ethernet does — `pre_install.sh` installs and enables `NetworkManager
 A: Data is irrecoverable without the password. This is intentional full-disk encryption.
 
 **Q: How do I switch between kernels?**
-A: Both regular and LTS kernels are installed. Use `sudo reboot` and select from boot menu, or edit `/boot/loader/entries/`.
+A: Both regular and LTS kernels are installed, and systemd-boot lists both automatically. Other kernels need a UKI too: in `/etc/mkinitcpio.d/<kernel>.preset`, comment out `default_image`, set `default_uki="/boot/EFI/Linux/arch-<kernel>.efi"`, then run `mkinitcpio -p <kernel>`.
+
+**Q: How do I move an older install from separate kernel files to UKIs?**
+A: Install `systemd-ukify`, put your current options in `/etc/kernel/cmdline`, edit both presets as above, and set `default arch-linux.efi` in `/boot/loader/loader.conf`. Re-run `post_install.sh`, check `sbverify` passes on the new UKIs, then delete the old files in `/boot/loader/entries/`.

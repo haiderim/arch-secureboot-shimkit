@@ -1,5 +1,5 @@
 [Unit]
-Description=Restore Secure Boot pacman hooks and re-sign kernels if missing
+Description=Restore missing Secure Boot signing hooks and sign any unsigned UKI
 Documentation=https://github.com/haiderim/arch-secureboot-shimkit
 After=local-fs.target
 RequiresMountsFor=/boot

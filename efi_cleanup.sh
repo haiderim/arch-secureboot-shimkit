@@ -34,22 +34,23 @@ efibootmgr -c -d "$ESP_DISK" -p "$ESP_PARTNUM" \
   -L "Arch (SecureBoot)" \
   -l '\EFI\arch\shimx64.efi'
 
-# --- Set boot order preference (Arch first, then Windows) ---
+# --- Set boot order preference (Arch first, then Windows, then everything else) ---
 echo "[EFI-CLEANUP] Setting Arch (SecureBoot) as primary boot, Windows second..."
 ARCH_NUM=$(efibootmgr | awk '/Arch \(SecureBoot\)/{print substr($1,5,4); exit}')
 WIN_NUM=$(efibootmgr | awk '/Windows Boot Manager/{print substr($1,5,4); exit}')
+CURRENT_ORDER=$(efibootmgr | awk '/^BootOrder:/{print $2}')
 
-if [[ -n "$ARCH_NUM" && -n "$WIN_NUM" ]]; then
-  efibootmgr -o "$ARCH_NUM,$WIN_NUM"
-  echo "[EFI-CLEANUP] BootOrder set to Arch first, Windows second"
-elif [[ -n "$ARCH_NUM" ]]; then
-  efibootmgr -o "$ARCH_NUM"
-  echo "[EFI-CLEANUP] BootOrder set to Arch only (Windows not found)"
-elif [[ -n "$WIN_NUM" ]]; then
-  efibootmgr -o "$WIN_NUM"
-  echo "[EFI-CLEANUP] BootOrder set to Windows only (Arch not found)"
+# Keep every other entry (USB, PXE, other OSes) in its existing relative order.
+NEW_ORDER=""
+for num in $ARCH_NUM $WIN_NUM ${CURRENT_ORDER//,/ }; do
+  [[ ",$NEW_ORDER," == *",$num,"* ]] || NEW_ORDER="${NEW_ORDER:+$NEW_ORDER,}$num"
+done
+
+if [[ -n "$NEW_ORDER" ]]; then
+  efibootmgr -o "$NEW_ORDER"
+  echo "[EFI-CLEANUP] BootOrder set to $NEW_ORDER"
 else
-  echo "[EFI-CLEANUP] No Arch or Windows entries found to reorder!"
+  echo "[EFI-CLEANUP] No boot entries found to reorder!"
 fi
 
 echo "[EFI-CLEANUP] EFI cleanup and rebuild complete."

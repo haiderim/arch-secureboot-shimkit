@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # Secure Boot kernel signing script
-# This script signs all kernels on the ESP after pacman updates
+# Signs every unified kernel image (UKI) on the ESP
 
 # Configuration
 # Installed by post_install.sh; hooks run with a clean environment, so custom
@@ -23,8 +23,8 @@ if [[ ! -f "$MOK_DIR/MOK.key" || ! -f "$MOK_DIR/MOK.crt" ]]; then
   exit 1
 fi
 
-if ! command -v sbsign >/dev/null 2>&1; then
-  log_error "sbsign not found. Install sbsigntools package."
+if ! command -v sbsign >/dev/null 2>&1 || ! command -v sbverify >/dev/null 2>&1; then
+  log_error "sbsign/sbverify not found. Install sbsigntools package."
   exit 1
 fi
 
@@ -38,6 +38,11 @@ fi
 sign_in_place() {
   local f="$1"
   [[ -f "$f" ]] || return 0
+  # Signing again would add another signature, not replace the existing one.
+  if sbverify --cert "$MOK_DIR/MOK.crt" "$f" >/dev/null 2>&1; then
+    log_info "Already signed: $f"
+    return 0
+  fi
   log_info "Signing $f"
   local tmp="${f}.signed"
   if sbsign --key "$MOK_DIR/MOK.key" --cert "$MOK_DIR/MOK.crt" --output "$tmp" "$f"; then
@@ -54,8 +59,8 @@ sign_in_place() {
 kernel_count=0
 signed_count=0
 
-# Sign all kernels on ESP
-for k in "$ESP_MOUNT"/vmlinuz-*; do
+# Sign all unified kernel images on the ESP
+for k in "$ESP_MOUNT"/EFI/Linux/*.efi; do
   if [[ -f "$k" ]]; then
     ((kernel_count++)) || true
     if sign_in_place "$k"; then
@@ -65,16 +70,16 @@ for k in "$ESP_MOUNT"/vmlinuz-*; do
 done
 
 if [[ $kernel_count -eq 0 ]]; then
-  log_warn "No kernels found in $ESP_MOUNT"
+  log_warn "No unified kernel images found in $ESP_MOUNT/EFI/Linux"
 else
   log_info "Kernel signing completed: $signed_count/$kernel_count kernels signed"
 fi
 
-# Verify signatures (optional but helpful)
-if command -v sbverify >/dev/null 2>&1; then
+# Verify signatures
+if [[ $kernel_count -gt 0 ]]; then
   log_info "Verifying kernel signatures..."
   verified_count=0
-  for k in "$ESP_MOUNT"/vmlinuz-*; do
+  for k in "$ESP_MOUNT"/EFI/Linux/*.efi; do
     if [[ -f "$k" ]]; then
       # --list exits 0 even on unsigned images; --cert really checks the signature.
       if sbverify --cert "$MOK_DIR/MOK.crt" "$k" >/dev/null 2>&1; then

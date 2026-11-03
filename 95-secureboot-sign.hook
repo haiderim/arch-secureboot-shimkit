@@ -1,14 +1,10 @@
 [Trigger]
 Operation = Install
 Operation = Upgrade
-Type = Package
-Target = linux
-Target = linux-lts
-Target = linux-zen
-Target = linux-hardened
-
+Type = Path
+Target = usr/lib/modules/*/vmlinuz
 
 [Action]
-Description = Sign kernel for Secure Boot
+Description = Check and sign unified kernel images for Secure Boot
 When = PostTransaction
 Exec = /usr/local/sbin/secureboot-sign-kernels.sh

@@ -1,0 +1,6 @@
+#!/bin/bash
+# mkinitcpio post hook: sign each UKI as soon as it is built. Rebuilds also come
+# from firmware, systemd and manual `mkinitcpio -P` runs, not just kernel updates.
+# Arguments: <kernel> <initramfs> [<uki>]
+[[ -n "${3:-}" ]] || exit 0
+exec /usr/local/sbin/secureboot-sign-kernels.sh
